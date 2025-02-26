@@ -69,14 +69,21 @@ async function refreshAlchemyToken() {
 router.put("/update-alchemy", async (req, res) => {
     console.log("📩 Received Google Calendar Update:", JSON.stringify(req.body, null, 2));
 
-    if (!req.body || !req.body.id || !req.body.start || !req.body.end) {
+    if (!req.body || !req.body.description || !req.body.start || !req.body.end) {
         console.error("❌ Invalid request data:", JSON.stringify(req.body, null, 2));
         return res.status(400).json({ error: "Invalid request data" });
     }
 
-    console.log("🔍 Extracted Start Date:", req.body.start.dateTime);
-    console.log("🔍 Extracted End Date:", req.body.end.dateTime);
+    // ✅ Extract Record ID from event description (e.g., "Alchemy Reservation RecordID: 50982")
+    const recordIdMatch = req.body.description.match(/RecordID:\s*(\d+)/);
+    if (!recordIdMatch) {
+        console.error("❌ No valid Record ID found in event description:", req.body.description);
+        return res.status(400).json({ error: "Record ID not found in event description" });
+    }
+    const recordId = recordIdMatch[1]; // Extracted numeric ID
+    console.log("🔍 Extracted Record ID:", recordId);
 
+    // ✅ Convert Dates to UTC Format
     const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
     const formattedEnd = convertToAlchemyFormat(req.body.end.dateTime);
 
@@ -84,15 +91,15 @@ router.put("/update-alchemy", async (req, res) => {
         return res.status(400).json({ error: "Invalid date format received" });
     }
 
-    // Refresh Alchemy Token
+    // ✅ Refresh Alchemy Token
     const alchemyToken = await refreshAlchemyToken();
     if (!alchemyToken) {
         return res.status(500).json({ error: "Failed to refresh Alchemy token" });
     }
 
-    // Construct the payload for Alchemy
+    // ✅ Construct Alchemy Payload
     const alchemyPayload = {
-        recordId: req.body.id,
+        recordId: Number(recordId), // Ensure it's a number
         fields: [
             { identifier: "StartUse", rows: [{ row: 0, values: [{ value: formattedStart }] }] },
             { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
