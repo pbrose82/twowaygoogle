@@ -2,6 +2,7 @@
   "name": "google-alchemy-middleware",
   "version": "1.0.0",
   "main": "index.js",
+  "type": "module",  // ✅ This tells Node.js to use ES module syntax
   "scripts": {
     "test": "echo \"Error: no test specified\" && exit 1"
   },
