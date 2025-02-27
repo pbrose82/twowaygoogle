@@ -35,19 +35,24 @@ app.use((req, res, next) => {
   next();
 });
 
-// Direct route for Google Calendar event creation 
-// (for compatibility with existing integrations)
+// Direct routes for backward compatibility - SUPPORT BOTH PUT AND POST
 app.post('/create-event', (req, res) => {
   console.log("⚠️ Direct call to /create-event detected, forwarding to /google/create-event");
   req.url = '/create-event';
   googleMiddleware(req, res);
 });
 
-// Direct route for Alchemy updates
-// (for compatibility with existing integrations)
+// Support both PUT and POST for update-alchemy
 app.put('/update-alchemy', (req, res) => {
-  console.log("⚠️ Direct call to /update-alchemy detected, forwarding to /alchemy/update-alchemy");
+  console.log("⚠️ Direct call to PUT /update-alchemy detected, forwarding to /alchemy/update-alchemy");
   req.url = '/update-alchemy';
+  alchemyMiddleware(req, res);
+});
+
+app.post('/update-alchemy', (req, res) => {
+  console.log("⚠️ Direct call to POST /update-alchemy detected, forwarding to /alchemy/update-alchemy");
+  req.url = '/update-alchemy';
+  req.method = 'PUT'; // Convert to PUT since alchemyMiddleware expects PUT
   alchemyMiddleware(req, res);
 });
 
@@ -59,7 +64,7 @@ app.use('/google', googleMiddleware);
 app.get('/status', (req, res) => {
   res.json({
     status: 'ok',
-    version: '1.0.2',
+    version: '1.0.3',
     timestamp: new Date().toISOString(),
     alchemy: {
       configured: !!process.env.ALCHEMY_REFRESH_TOKEN
@@ -71,11 +76,13 @@ app.get('/status', (req, res) => {
     },
     routes: {
       "/create-event": "POST - Create or update Google Calendar event (direct)",
+      "/update-alchemy": "POST or PUT - Update Alchemy from Google Calendar (direct)",
       "/google/create-event": "POST - Create or update Google Calendar event",
       "/google/update-event": "PUT - Update an existing Google Calendar event",
       "/google/delete-event/:recordId": "DELETE - Delete a Google Calendar event",
-      "/update-alchemy": "PUT - Update Alchemy from Google Calendar (direct)",
-      "/alchemy/update-alchemy": "PUT - Update Alchemy from Google Calendar"
+      "/google/tracked-events": "GET - View all tracked events (debug)",
+      "/alchemy/update-alchemy": "PUT - Update Alchemy from Google Calendar",
+      "/status": "GET - API status and configuration"
     }
   });
 });
@@ -95,10 +102,11 @@ app.use((req, res, next) => {
     message: `Route not found: ${req.method} ${req.originalUrl}`,
     availableRoutes: [
       "POST /create-event",
-      "PUT /update-alchemy",
+      "POST or PUT /update-alchemy",
       "POST /google/create-event", 
       "PUT /google/update-event",
       "DELETE /google/delete-event/:recordId",
+      "GET /google/tracked-events",
       "PUT /alchemy/update-alchemy",
       "GET /status"
     ]
@@ -127,6 +135,7 @@ app.listen(PORT, () => {
   console.log(`- GOOGLE_CLIENT_ID: ${process.env.GOOGLE_CLIENT_ID ? 'configured ✓' : 'missing ✗'}`);
   console.log(`- GOOGLE_CLIENT_SECRET: ${process.env.GOOGLE_CLIENT_SECRET ? 'configured ✓' : 'missing ✗'}`);
   console.log(`- GOOGLE_REFRESH_TOKEN: ${process.env.GOOGLE_REFRESH_TOKEN ? 'configured ✓' : 'missing ✗'}`);
+  console.log(`- EVENT_TRACKING_FILE: ${process.env.EVENT_TRACKING_FILE || '/tmp/event_tracking.json'}`);
 });
 
 // Handle unhandled exceptions
