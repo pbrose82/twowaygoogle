@@ -18,13 +18,27 @@ const ALCHEMY_REFRESH_TOKEN = process.env.ALCHEMY_REFRESH_TOKEN;
 const SCOPES = ['https://www.googleapis.com/auth/calendar'];
 const calendar = google.calendar('v3');
 
-// Initialize Google Auth client
-const auth = new google.auth.JWT(
-  process.env.GOOGLE_CLIENT_EMAIL,
-  null,
-  process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
-  SCOPES
-);
+// Get Google API credentials from environment variables
+const GOOGLE_API_ENABLED = !!(process.env.GOOGLE_CLIENT_EMAIL && process.env.GOOGLE_PRIVATE_KEY);
+
+// Initialize Google Auth client if credentials are available
+let auth = null;
+if (GOOGLE_API_ENABLED) {
+    try {
+        auth = new google.auth.JWT(
+            process.env.GOOGLE_CLIENT_EMAIL,
+            null,
+            process.env.GOOGLE_PRIVATE_KEY.replace(/\\n/g, '\n'),
+            SCOPES
+        );
+        console.log("✅ Google Auth client initialized successfully");
+    } catch (error) {
+        console.error("⚠️ Failed to initialize Google Auth client:", error.message);
+    }
+} else {
+    console.warn("⚠️ Google Calendar integration disabled: Missing API credentials");
+    console.warn("   Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY environment variables to enable");
+}
 
 // Store mapping between Alchemy record IDs and Google Calendar event IDs
 // In production, use a database instead of in-memory storage
@@ -49,7 +63,7 @@ function convertToAlchemyFormat(dateString) {
 }
 
 /**
- * ✅ Convert Date to Google Calendar Format
+ * 🆕 Convert Date to Google Calendar Format
  */
 function convertToGoogleFormat(alchemyDateString) {
     try {
@@ -106,6 +120,11 @@ async function refreshAlchemyToken() {
  * 🆕 Find existing Google Calendar event by Alchemy record ID
  */
 async function findExistingGoogleEvent(recordId, calendarId = 'primary') {
+    if (!GOOGLE_API_ENABLED || !auth) {
+        console.warn("⚠️ Cannot find Google Calendar event: Google API credentials not configured");
+        return null;
+    }
+
     console.log(`🔍 Looking for existing Google Calendar event for Alchemy record: ${recordId}`);
     
     // Check the in-memory map first
@@ -146,6 +165,11 @@ async function findExistingGoogleEvent(recordId, calendarId = 'primary') {
  * 🆕 Update or Create Google Calendar Event
  */
 async function updateOrCreateGoogleEvent(recordId, eventData, calendarId = 'primary') {
+    if (!GOOGLE_API_ENABLED || !auth) {
+        console.warn("⚠️ Cannot update Google Calendar: Google API credentials not configured");
+        return { success: false, message: "Google Calendar integration not configured" };
+    }
+
     try {
         // Create the event object
         const event = {
@@ -181,6 +205,7 @@ async function updateOrCreateGoogleEvent(recordId, eventData, calendarId = 'prim
                 resource: event
             });
             console.log(`✅ Google Calendar event updated: ${existingEventId}`);
+            return { success: true, message: "Event updated", eventId: existingEventId };
         } else {
             // Create new event
             console.log(`➕ Creating new Google Calendar event for Alchemy record: ${recordId}`);
@@ -193,12 +218,11 @@ async function updateOrCreateGoogleEvent(recordId, eventData, calendarId = 'prim
             // Store the mapping
             eventMappings.set(recordId, response.data.id);
             console.log(`✅ New Google Calendar event created: ${response.data.id}`);
+            return { success: true, message: "Event created", eventId: response.data.id };
         }
-        
-        return response.data;
     } catch (error) {
         console.error(`🔴 Error updating/creating Google Calendar event: ${error.message}`);
-        throw error;
+        return { success: false, message: error.message };
     }
 }
 
@@ -272,6 +296,13 @@ router.put("/update-alchemy", async (req, res) => {
 router.put("/update-google", async (req, res) => {
     console.log("📩 Received Alchemy Update:", JSON.stringify(req.body, null, 2));
 
+    if (!GOOGLE_API_ENABLED) {
+        return res.status(503).json({ 
+            error: "Google Calendar integration not configured", 
+            message: "Set GOOGLE_CLIENT_EMAIL and GOOGLE_PRIVATE_KEY environment variables to enable"
+        });
+    }
+
     if (!req.body || !req.body.recordId) {
         console.error("❌ Invalid request data:", JSON.stringify(req.body, null, 2));
         return res.status(400).json({ error: "Invalid request data" });
@@ -302,8 +333,7 @@ router.put("/update-google", async (req, res) => {
                 endTime = convertToGoogleFormat(endField.rows[0].values[0].value);
             }
             
-            // You may extract other fields like summary, description if needed
-            // For example:
+            // Extract title/summary if available
             const titleField = req.body.fields.find(field => field.identifier === "Title");
             if (titleField && titleField.rows && titleField.rows[0].values[0].value) {
                 summary = titleField.rows[0].values[0].value;
@@ -311,6 +341,7 @@ router.put("/update-google", async (req, res) => {
                 summary = `Alchemy Record: ${recordId}`;
             }
             
+            // Extract description if available
             const descField = req.body.fields.find(field => field.identifier === "Description");
             if (descField && descField.rows && descField.rows[0].values[0].value) {
                 description = descField.rows[0].values[0].value;
@@ -319,7 +350,7 @@ router.put("/update-google", async (req, res) => {
             }
         }
         
-        if (!startTime || !endTime) {
+        if (!isCancellation && (!startTime || !endTime)) {
             return res.status(400).json({ error: "Missing start or end time in the request" });
         }
 
@@ -340,6 +371,9 @@ router.put("/update-google", async (req, res) => {
                 });
                 console.log(`🗑️ Google Calendar event deleted: ${existingEventId}`);
                 eventMappings.delete(recordId);
+                return res.status(200).json({ success: true, message: "Google Calendar event deleted" });
+            } else {
+                return res.status(404).json({ success: false, message: "No existing Google Calendar event found to delete" });
             }
         } else {
             // Update or create the Google Calendar event
@@ -350,14 +384,28 @@ router.put("/update-google", async (req, res) => {
                 end: endTime
             };
             
-            await updateOrCreateGoogleEvent(recordId, eventData);
+            const result = await updateOrCreateGoogleEvent(recordId, eventData);
+            return res.status(result.success ? 200 : 500).json(result);
         }
-        
-        res.status(200).json({ success: true, message: "Google Calendar event updated" });
     } catch (error) {
         console.error("🔴 Error updating Google Calendar:", error.message);
-        res.status(500).json({ error: "Failed to update Google Calendar", details: error.message });
+        return res.status(500).json({ error: "Failed to update Google Calendar", details: error.message });
     }
+});
+
+/**
+ * 🆕 Status endpoint to check if Google Calendar integration is enabled
+ */
+router.get("/status", (req, res) => {
+    res.status(200).json({
+        alchemy: {
+            configured: !!ALCHEMY_REFRESH_TOKEN
+        },
+        google: {
+            configured: GOOGLE_API_ENABLED,
+            initialized: !!auth
+        }
+    });
 });
 
 export default router;
