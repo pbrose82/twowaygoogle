@@ -8,66 +8,91 @@ dotenv.config();
 
 const router = express.Router();
 
-// Simplified event tracking
-let eventMappings = {};
+// Global in-memory tracking (persists during runtime)
+const eventMappings = {};
 
-// Try to load existing mappings if available
-const TRACKING_FILE = '/tmp/er_events.json';
-try {
-    if (fs.existsSync(TRACKING_FILE)) {
-        const fileContent = fs.readFileSync(TRACKING_FILE, 'utf8');
-        eventMappings = JSON.parse(fileContent);
-        console.log(`📂 Loaded ${Object.keys(eventMappings).length} ER code mappings`);
+// Custom file paths for maximum compatibility
+const TRACKING_FILE = process.env.EVENT_TRACKING_FILE || '/tmp/er_events.json';
+console.log(`Using tracking file at: ${TRACKING_FILE}`);
+
+// Load previously saved mappings
+function loadMappings() {
+    console.log(`Attempting to load tracking data from: ${TRACKING_FILE}`);
+    try {
+        if (fs.existsSync(TRACKING_FILE)) {
+            const data = fs.readFileSync(TRACKING_FILE, 'utf8');
+            console.log(`Read tracking file contents: ${data.substring(0, 100)}${data.length > 100 ? '...' : ''}`);
+            
+            const parsed = JSON.parse(data);
+            const count = Object.keys(parsed).length;
+            
+            // Update our in-memory mappings
+            Object.assign(eventMappings, parsed);
+            
+            console.log(`✅ Loaded ${count} event mappings`);
+            console.log(`Current mappings: ${JSON.stringify(eventMappings)}`);
+            return true;
+        } else {
+            console.log(`Tracking file does not exist yet`);
+            return false;
+        }
+    } catch (error) {
+        console.error(`❌ Error loading mappings: ${error.message}`);
+        return false;
     }
-} catch (error) {
-    console.error(`⚠️ Error loading tracking file: ${error.message}`);
 }
 
-// Save mappings periodically
+// Save mappings to disk
 function saveMappings() {
     try {
+        console.log(`Saving mappings: ${JSON.stringify(eventMappings)}`);
         fs.writeFileSync(TRACKING_FILE, JSON.stringify(eventMappings, null, 2), 'utf8');
-        console.log(`📂 Saved ${Object.keys(eventMappings).length} ER code mappings`);
+        console.log(`✅ Saved ${Object.keys(eventMappings).length} mappings to ${TRACKING_FILE}`);
+        
+        // Verify we can read what we wrote
+        if (fs.existsSync(TRACKING_FILE)) {
+            const content = fs.readFileSync(TRACKING_FILE, 'utf8');
+            console.log(`✅ Verified tracking file content: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
+        }
+        return true;
     } catch (error) {
-        console.error(`⚠️ Error saving tracking file: ${error.message}`);
+        console.error(`❌ Error saving mappings: ${error.message}`);
+        return false;
     }
 }
 
-// Extract ER code from summary
+// Extract ER code from summary (for unique tracking)
 function extractERCode(summary) {
     if (!summary) return null;
     
     const match = summary.match(/^(ER\d+)/);
     if (match && match[1]) {
-        console.log(`✅ Found ER code: ${match[1]}`);
-        return match[1];
+        const erCode = match[1];
+        console.log(`✅ Found ER code: ${erCode}`);
+        return erCode;
     }
     
     return null;
 }
 
-// ✅ Function to Convert Alchemy Date to ISO Format
+// Convert date formats
 function convertAlchemyDate(dateString, timeZone) {
     try {
         if (!dateString) return null;
         
-        // Handle different Alchemy date formats
+        // Try different formats
         let date;
-        
-        // Try different formats in order of likelihood
         const formats = [
             "MMM dd yyyy hh:mm a",   // Feb 28 2025 02:00 PM
             "yyyy-MM-dd'T'HH:mm:ss'Z'", // 2025-02-28T14:00:00Z
             "yyyy-MM-dd'T'HH:mm:ss.SSS'Z'", // 2025-02-28T14:00:00.000Z
         ];
         
-        // Try each format until one works
         for (let format of formats) {
             date = DateTime.fromFormat(dateString, format, { zone: "UTC" });
             if (date.isValid) break;
         }
         
-        // If none of the formats worked, try ISO parsing as a fallback
         if (!date || !date.isValid) {
             date = DateTime.fromISO(dateString, { zone: "UTC" });
         }
@@ -78,8 +103,8 @@ function convertAlchemyDate(dateString, timeZone) {
         
         return date.setZone(timeZone).toISO();
     } catch (error) {
-        console.error("❌ Date conversion error:", error.message);
-        // Return the original string if it looks like an ISO date already
+        console.error(`❌ Date conversion error: ${error.message}`);
+        
         if (dateString.includes('T') && (dateString.includes('Z') || dateString.includes('+'))) {
             return dateString;
         }
@@ -87,7 +112,7 @@ function convertAlchemyDate(dateString, timeZone) {
     }
 }
 
-// ✅ Function to Refresh Google API Access Token
+// Get Google access token
 async function getGoogleAccessToken() {
     try {
         const response = await fetch("https://oauth2.googleapis.com/token", {
@@ -109,56 +134,103 @@ async function getGoogleAccessToken() {
         
         return data.access_token;
     } catch (error) {
-        console.error("❌ Error refreshing Google access token:", error.message);
+        console.error(`❌ Error getting Google token: ${error.message}`);
         return null;
     }
 }
 
-// Create a new event in Google Calendar
-async function createNewEvent(accessToken, calendarId, eventBody, erCode) {
-    console.log(`➕ Creating new event ${erCode ? `for ER code ${erCode}` : ''}`);
-    
-    const response = await fetch(
-        `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
-        {
-            method: "POST",
-            headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(eventBody)
+// Ensure we have our mappings loaded
+loadMappings();
+
+// Create a new Google Calendar event
+async function createEvent(accessToken, calendarId, eventBody, erCode) {
+    try {
+        console.log(`Creating new event for ER code: ${erCode}`);
+        
+        const response = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+            {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(eventBody)
+            }
+        );
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            console.error(`Error response: ${JSON.stringify(data)}`);
+            throw new Error(`Google Calendar Error: ${data.error?.message || JSON.stringify(data)}`);
         }
-    );
-    
-    const data = await response.json();
-    
-    if (!response.ok) {
-        throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
-    }
-    
-    // If we have an ER code, save the mapping
-    if (erCode) {
+        
+        // Store the mapping of ER code to event ID
+        console.log(`Recording mapping: ${erCode} -> ${data.id}`);
         eventMappings[erCode] = data.id;
         saveMappings();
+        
+        return data;
+    } catch (error) {
+        console.error(`Error creating event: ${error.message}`);
+        throw error;
     }
-    
-    console.log(`✅ Successfully created new event: ${data.id}`);
-    return data;
 }
 
-// Route to create or update event
+// Update an existing Google Calendar event
+async function updateEvent(accessToken, calendarId, eventId, eventBody) {
+    try {
+        console.log(`Updating event: ${eventId}`);
+        
+        const response = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(eventBody)
+            }
+        );
+        
+        // Handle 404 (event was deleted)
+        if (response.status === 404) {
+            console.log(`Event ${eventId} not found (likely deleted)`);
+            return null;
+        }
+        
+        const data = await response.json();
+        
+        if (!response.ok) {
+            throw new Error(`Google Calendar Error: ${data.error?.message || JSON.stringify(data)}`);
+        }
+        
+        return data;
+    } catch (error) {
+        console.error(`Error updating event: ${error.message}`);
+        throw error;
+    }
+}
+
+// Create or update event route
 router.post("/create-event", async (req, res) => {
     console.log("📩 Request received:", JSON.stringify(req.body, null, 2));
+    console.log("Current event mappings:", JSON.stringify(eventMappings));
+    
+    // Refresh our event mappings just in case
+    loadMappings();
     
     try {
-        // Extract basic event details
+        // Get basic event details
         const summary = req.body.summary || "";
         const description = req.body.description || "";
         const location = req.body.location || "";
         const calendarId = req.body.calendarId || "primary";
         const timeZone = req.body.timeZone || "America/New_York";
         
-        // Get dates
+        // Get start and end times
         let startTime, endTime;
         
         if (req.body.start && req.body.start.dateTime) {
@@ -177,21 +249,14 @@ router.post("/create-event", async (req, res) => {
             return res.status(400).json({ error: "Missing start or end time" });
         }
         
-        // CRITICAL: Extract ER code from summary
+        // Extract ER code from summary
         const erCode = extractERCode(summary);
         if (!erCode) {
-            console.log("⚠️ No ER code found in summary, creating as new event");
-        } else {
-            console.log(`🔍 Looking for existing event with ER code: ${erCode}`);
+            console.log("No ER code found in summary");
+            return res.status(400).json({ error: "No ER code found in summary" });
         }
         
-        // Get access token
-        const accessToken = await getGoogleAccessToken();
-        if (!accessToken) {
-            return res.status(500).json({ error: "Failed to obtain Google access token" });
-        }
-        
-        // Convert dates
+        // Convert times to ISO format
         const startISO = convertAlchemyDate(startTime, timeZone);
         const endISO = convertAlchemyDate(endTime, timeZone);
         
@@ -199,7 +264,7 @@ router.post("/create-event", async (req, res) => {
             return res.status(400).json({ error: "Invalid date format" });
         }
         
-        // Create event object
+        // Prepare event data
         const eventBody = {
             summary: summary,
             description: description,
@@ -209,115 +274,92 @@ router.post("/create-event", async (req, res) => {
             reminders: req.body.reminders || { useDefault: true }
         };
         
-        // Check if we have an existing event with this ER code
-        if (erCode && eventMappings[erCode]) {
-            // Try to update existing event
-            const eventId = eventMappings[erCode];
-            console.log(`🔄 Attempting to update existing event ${eventId} for ER code ${erCode}`);
-            
-            try {
-                const response = await fetch(
-                    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
-                    {
-                        method: "PATCH",
-                        headers: {
-                            "Authorization": `Bearer ${accessToken}`,
-                            "Content-Type": "application/json"
-                        },
-                        body: JSON.stringify(eventBody)
-                    }
-                );
-                
-                // If event was deleted (404), create a new one
-                if (response.status === 404) {
-                    console.log(`🔶 Event ${eventId} not found (was deleted). Creating new event...`);
-                    // Remove old mapping
-                    delete eventMappings[erCode];
-                    
-                    // Create new event
-                    const newEventData = await createNewEvent(accessToken, calendarId, eventBody, erCode);
-                    
-                    return res.status(200).json({
-                        success: true,
-                        action: "recreated",
-                        event: newEventData,
-                        erCode: erCode
-                    });
-                }
-                
-                // If update succeeded
-                if (response.ok) {
-                    const data = await response.json();
-                    console.log(`✅ Successfully updated event: ${eventId}`);
-                    
-                    return res.status(200).json({
-                        success: true,
-                        action: "updated",
-                        event: data,
-                        erCode: erCode
-                    });
-                } else {
-                    // Some other error
-                    const errorData = await response.json();
-                    console.error(`❌ Error updating event: ${JSON.stringify(errorData)}`);
-                    throw new Error(`Google Calendar Update Error: ${JSON.stringify(errorData)}`);
-                }
-            } catch (error) {
-                if (error.message.includes('404')) {
-                    // Handle the case where the event was deleted
-                    console.log(`🔶 Error indicates event ${eventId} was deleted. Creating new event...`);
-                    delete eventMappings[erCode];
-                    
-                    // Create new event
-                    const newEventData = await createNewEvent(accessToken, calendarId, eventBody, erCode);
-                    
-                    return res.status(200).json({
-                        success: true,
-                        action: "recreated",
-                        event: newEventData,
-                        erCode: erCode
-                    });
-                } else {
-                    // Re-throw other errors
-                    throw error;
-                }
-            }
+        // Get Google access token
+        const accessToken = await getGoogleAccessToken();
+        if (!accessToken) {
+            return res.status(500).json({ error: "Failed to obtain Google access token" });
         }
         
-        // Create new event for cases where:
-        // 1. No ER code was found
-        // 2. No existing mapping for this ER code
-        const data = await createNewEvent(accessToken, calendarId, eventBody, erCode);
+        // Check if we have a mapping for this ER code
+        const existingEventId = eventMappings[erCode];
+        console.log(`Looking for existing event with ER code ${erCode}: ${existingEventId || 'not found'}`);
         
-        return res.status(200).json({
-            success: true,
-            action: "created",
-            event: data,
-            erCode: erCode
-        });
+        let result;
+        
+        if (existingEventId) {
+            // Try to update the existing event
+            result = await updateEvent(accessToken, calendarId, existingEventId, eventBody);
+            
+            // If event was deleted, create a new one
+            if (!result) {
+                console.log(`Event ${existingEventId} was deleted, creating new one`);
+                delete eventMappings[erCode];
+                saveMappings();
+                
+                result = await createEvent(accessToken, calendarId, eventBody, erCode);
+                
+                return res.status(200).json({
+                    success: true,
+                    action: "recreated",
+                    event: result,
+                    erCode: erCode
+                });
+            }
+            
+            console.log(`Successfully updated event: ${existingEventId}`);
+            return res.status(200).json({
+                success: true,
+                action: "updated",
+                event: result,
+                erCode: erCode
+            });
+        } else {
+            // Create a new event
+            result = await createEvent(accessToken, calendarId, eventBody, erCode);
+            
+            console.log(`Successfully created new event: ${result.id}`);
+            return res.status(200).json({
+                success: true,
+                action: "created",
+                event: result,
+                erCode: erCode
+            });
+        }
     } catch (error) {
-        console.error(`❌ Error: ${error.message}`);
+        console.error(`Error: ${error.message}`);
         return res.status(500).json({ error: error.message });
     }
 });
 
-// Route to get tracked events
+// Get all tracked events
 router.get("/tracked-events", (req, res) => {
-    return res.status(200).json(eventMappings);
+    // Refresh our knowledge of tracked events
+    loadMappings();
+    
+    return res.status(200).json({
+        mappings: eventMappings,
+        count: Object.keys(eventMappings).length,
+        trackingFile: TRACKING_FILE
+    });
 });
 
-// Route to clear tracked events
+// Clear all tracked events
 router.delete("/tracked-events", (req, res) => {
-    eventMappings = {};
+    // Clear the in-memory mappings
+    Object.keys(eventMappings).forEach(key => {
+        delete eventMappings[key];
+    });
+    
+    // Save the empty mappings
     saveMappings();
     
     return res.status(200).json({
         success: true,
-        message: "Cleared all event mappings"
+        message: "All event mappings cleared"
     });
 });
 
-// Manually remove a specific ER code mapping
+// Manual management of tracked events
 router.delete("/tracked-events/:erCode", (req, res) => {
     const erCode = req.params.erCode;
     
@@ -328,14 +370,15 @@ router.delete("/tracked-events/:erCode", (req, res) => {
         
         return res.status(200).json({
             success: true,
-            message: `Removed mapping for ER code ${erCode} (event ID: ${eventId})`
-        });
-    } else {
-        return res.status(404).json({
-            success: false,
-            message: `No mapping found for ER code ${erCode}`
+            message: `Removed mapping for ${erCode}`,
+            removedEventId: eventId
         });
     }
+    
+    return res.status(404).json({
+        success: false,
+        message: `No mapping found for ${erCode}`
+    });
 });
 
 export default router;
