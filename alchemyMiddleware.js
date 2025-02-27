@@ -138,7 +138,7 @@ router.put("/update-alchemy", async (req, res) => {
 /**
  * ✅ Route: Handle Google Calendar Event Deletion & Update Alchemy
  */
-router.post("/delete-alchemy", async (req, res) => {
+router.put("/delete-alchemy", async (req, res) => {
     console.log("🚨 Received Google Calendar Deletion:", JSON.stringify(req.body, null, 2));
 
     if (!req.body || !req.body.description) {
