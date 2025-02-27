@@ -1,129 +1,100 @@
 import express from "express";
 import fetch from "node-fetch";
-import { DateTime } from "luxon";
 import dotenv from "dotenv";
+import { DateTime } from "luxon";
 
 dotenv.config();
 
 const router = express.Router();
 
-const ALCHEMY_REFRESH_URL = "https://core-production.alchemy.cloud/core/api/v2/refresh-token";
-const ALCHEMY_UPDATE_URL = "https://core-production.alchemy.cloud/core/api/v2/update-record";
-const TENANT_NAME = "productcaseelnlims4uat";
-const ALCHEMY_REFRESH_TOKEN = process.env.ALCHEMY_REFRESH_TOKEN;
+const GOOGLE_CALENDAR_ID = "c_9550b7b33705605f4eb4d81ca5393a6cebf014591aed9fc9b41a75a53844ba84@group.calendar.google.com";
+const GOOGLE_API_KEY = process.env.GOOGLE_API_KEY;
+const GOOGLE_ACCESS_TOKEN = process.env.GOOGLE_ACCESS_TOKEN;
+const GOOGLE_CALENDAR_EVENTS_URL = `https://www.googleapis.com/calendar/v3/calendars/${GOOGLE_CALENDAR_ID}/events`;
 
 /**
- * ✅ Convert Date to Alchemy Format (UTC)
+ * ✅ Function to Search for Existing Google Calendar Event
  */
-function convertToAlchemyFormat(dateString) {
-    try {
-        let date = DateTime.fromISO(dateString, { zone: "UTC" });
+async function findExistingEvent(recordId) {
+    const url = `${GOOGLE_CALENDAR_EVENTS_URL}?q=RecordID:${recordId}&key=${GOOGLE_API_KEY}`;
+    const response = await fetch(url, {
+        method: "GET",
+        headers: { Authorization: `Bearer ${GOOGLE_ACCESS_TOKEN}` },
+    });
 
-        if (!date.isValid) {
-            throw new Error(`Invalid date format received: ${dateString}`);
-        }
-
-        return date.toUTC().toFormat("yyyy-MM-dd'T'HH:mm:ss'Z'");
-    } catch (error) {
-        console.error("❌ Date conversion error:", error.message);
+    const data = await response.json();
+    if (!response.ok) {
+        console.error("❌ Error searching Google Calendar:", JSON.stringify(data));
         return null;
     }
+
+    const matchingEvent = data.items?.find(event => event.description?.includes(`RecordID: ${recordId}`));
+    return matchingEvent || null;
 }
 
 /**
- * ✅ Refresh Alchemy API Token
+ * ✅ Route to Push Alchemy Event to Google Calendar
  */
-async function refreshAlchemyToken() {
-    console.log("🔄 Refreshing Alchemy Token...");
+router.post("/push-to-calendar", async (req, res) => {
+    console.log("📩 Received Push to Calendar request:", JSON.stringify(req.body, null, 2));
 
-    try {
-        const response = await fetch(ALCHEMY_REFRESH_URL, {
-            method: "PUT",
-            headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ refreshToken: ALCHEMY_REFRESH_TOKEN })
-        });
-
-        const data = await response.json();
-
-        if (!response.ok) {
-            throw new Error(`Alchemy Token Refresh Failed: ${JSON.stringify(data)}`);
-        }
-
-        const tenantToken = data.tokens.find(token => token.tenant === TENANT_NAME);
-        if (!tenantToken) {
-            throw new Error(`Tenant '${TENANT_NAME}' not found in response.`);
-        }
-
-        console.log("✅ Alchemy Token Refreshed Successfully");
-        return tenantToken.accessToken;
-    } catch (error) {
-        console.error("🔴 Error refreshing Alchemy token:", error.message);
-        return null;
-    }
-}
-
-/**
- * ✅ Route to Handle Google Calendar Updates & Push to Alchemy
- */
-router.put("/update-alchemy", async (req, res) => {
-    console.log("📩 Received Google Calendar Update:", JSON.stringify(req.body, null, 2));
-
-    if (!req.body || !req.body.recordId) {
-        console.error("❌ Invalid request data:", JSON.stringify(req.body, null, 2));
-        return res.status(400).json({ error: "Invalid request data" });
+    const { recordId, title, start, end, description, location } = req.body;
+    if (!recordId || !start || !end || !title) {
+        return res.status(400).json({ error: "Missing required fields in request." });
     }
 
-    const recordId = req.body.recordId;
+    const startTime = DateTime.fromISO(start).toISO();
+    const endTime = DateTime.fromISO(end).toISO();
 
-    // ✅ Check if event is being cancelled
-    if (req.body.fields && req.body.fields[0].identifier === "EventStatus") {
-        console.log("🚨 Processing Event Cancellation for Record ID:", recordId);
-    } else {
-        // ✅ Convert Dates to UTC Format
-        const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
-        const formattedEnd = convertToAlchemyFormat(req.body.end.dateTime);
+    // ✅ Check if Event Already Exists in Google Calendar
+    const existingEvent = await findExistingEvent(recordId);
 
-        if (!formattedStart || !formattedEnd) {
-            return res.status(400).json({ error: "Invalid date format received" });
-        }
-
-        req.body.fields = [
-            { identifier: "StartUse", rows: [{ row: 0, values: [{ value: formattedStart }] }] },
-            { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
-        ];
-    }
-
-    // ✅ Refresh Alchemy Token
-    const alchemyToken = await refreshAlchemyToken();
-    if (!alchemyToken) {
-        return res.status(500).json({ error: "Failed to refresh Alchemy token" });
-    }
-
-    console.log("📤 Sending Alchemy Update Request:", JSON.stringify(req.body, null, 2));
-
-    try {
-        const response = await fetch(ALCHEMY_UPDATE_URL, {
+    let googleCalendarResponse;
+    if (existingEvent) {
+        // ✅ Update Existing Event
+        console.log(`🔄 Updating existing Google Calendar event: ${existingEvent.id}`);
+        const updateUrl = `${GOOGLE_CALENDAR_EVENTS_URL}/${existingEvent.id}?key=${GOOGLE_API_KEY}`;
+        googleCalendarResponse = await fetch(updateUrl, {
             method: "PUT",
             headers: {
-                "Authorization": `Bearer ${alchemyToken}`,
-                "Content-Type": "application/json"
+                Authorization: `Bearer ${GOOGLE_ACCESS_TOKEN}`,
+                "Content-Type": "application/json",
             },
-            body: JSON.stringify(req.body)
+            body: JSON.stringify({
+                summary: title,
+                location: location || "",
+                description: description || `Alchemy Reservation RecordID: ${recordId}`,
+                start: { dateTime: startTime, timeZone: "UTC" },
+                end: { dateTime: endTime, timeZone: "UTC" },
+            }),
         });
-
-        const responseText = await response.text();
-        console.log("🔍 Alchemy API Response Status:", response.status);
-        console.log("🔍 Alchemy API Raw Response:", responseText);
-
-        if (!response.ok) {
-            throw new Error(`Alchemy API Error: ${responseText}`);
-        }
-
-        res.status(200).json({ success: true, message: "Alchemy record updated", data: responseText });
-    } catch (error) {
-        console.error("🔴 Error updating Alchemy record:", error.message);
-        res.status(500).json({ error: "Failed to update Alchemy", details: error.message });
+    } else {
+        // ✅ Create New Event
+        console.log(`🆕 Creating new Google Calendar event for Record ID: ${recordId}`);
+        googleCalendarResponse = await fetch(GOOGLE_CALENDAR_EVENTS_URL, {
+            method: "POST",
+            headers: {
+                Authorization: `Bearer ${GOOGLE_ACCESS_TOKEN}`,
+                "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+                summary: title,
+                location: location || "",
+                description: description || `Alchemy Reservation RecordID: ${recordId}`,
+                start: { dateTime: startTime, timeZone: "UTC" },
+                end: { dateTime: endTime, timeZone: "UTC" },
+            }),
+        });
     }
+
+    const googleData = await googleCalendarResponse.json();
+    if (!googleCalendarResponse.ok) {
+        console.error("❌ Google Calendar API Error:", JSON.stringify(googleData));
+        return res.status(500).json({ error: "Failed to push event to Google Calendar", details: googleData });
+    }
+
+    console.log("✅ Google Calendar Event Created/Updated:", googleData);
+    res.status(200).json({ success: true, message: "Google Calendar event synced", event: googleData });
 });
 
 export default router;
