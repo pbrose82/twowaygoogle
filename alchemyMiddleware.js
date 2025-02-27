@@ -1,3 +1,4 @@
+
 import express from "express";
 import fetch from "node-fetch";
 import { DateTime } from "luxon";
@@ -5,15 +6,16 @@ import dotenv from "dotenv";
 
 dotenv.config();
 
-const app = express();
-app.use(express.json()); // Ensure JSON body is parsed
+const router = express.Router();
 
 const ALCHEMY_REFRESH_URL = "https://core-production.alchemy.cloud/core/api/v2/refresh-token";
 const ALCHEMY_UPDATE_URL = "https://core-production.alchemy.cloud/core/api/v2/update-record";
 const TENANT_NAME = "productcaseelnlims4uat";
 const ALCHEMY_REFRESH_TOKEN = process.env.ALCHEMY_REFRESH_TOKEN;
 
-// ✅ Function to Convert Date to Alchemy Format (UTC)
+/**
+ * ✅ Convert Date to Alchemy Format (UTC)
+ */
 function convertToAlchemyFormat(dateString) {
     try {
         let date = DateTime.fromISO(dateString, { zone: "UTC" });
@@ -29,7 +31,9 @@ function convertToAlchemyFormat(dateString) {
     }
 }
 
-// ✅ Function to Refresh Alchemy Token
+/**
+ * ✅ Refresh Alchemy API Token
+ */
 async function refreshAlchemyToken() {
     console.log("🔄 Refreshing Alchemy Token...");
 
@@ -59,30 +63,35 @@ async function refreshAlchemyToken() {
     }
 }
 
-// ✅ Route to Handle Google Calendar Updates & Push to Alchemy
-app.put("/update-alchemy", async (req, res) => {
+/**
+ * ✅ Route to Handle Google Calendar Updates & Push to Alchemy
+ */
+router.put("/update-alchemy", async (req, res) => {
     console.log("📩 Received Google Calendar Update:", JSON.stringify(req.body, null, 2));
 
-    if (!req.body || !req.body.description || !req.body.start || !req.body.end) {
+    if (!req.body || !req.body.recordId) {
         console.error("❌ Invalid request data:", JSON.stringify(req.body, null, 2));
         return res.status(400).json({ error: "Invalid request data" });
     }
 
-    // ✅ Extract Record ID from event description
-    const recordIdMatch = req.body.description.match(/RecordID:\s*(\d+)/);
-    if (!recordIdMatch) {
-        console.error("❌ No valid Record ID found in event description:", req.body.description);
-        return res.status(400).json({ error: "Record ID not found in event description" });
-    }
-    const recordId = recordIdMatch[1]; // Extracted numeric ID
-    console.log("🔍 Extracted Record ID:", recordId);
+    const recordId = req.body.recordId;
 
-    // ✅ Convert Dates to UTC Format
-    const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
-    const formattedEnd = convertToAlchemyFormat(req.body.end.dateTime);
+    // ✅ Check if event is being cancelled
+    if (req.body.fields && req.body.fields[0].identifier === "EventStatus") {
+        console.log("🚨 Processing Event Cancellation for Record ID:", recordId);
+    } else {
+        // ✅ Convert Dates to UTC Format
+        const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
+        const formattedEnd = convertToAlchemyFormat(req.body.end.dateTime);
 
-    if (!formattedStart || !formattedEnd) {
-        return res.status(400).json({ error: "Invalid date format received" });
+        if (!formattedStart || !formattedEnd) {
+            return res.status(400).json({ error: "Invalid date format received" });
+        }
+
+        req.body.fields = [
+            { identifier: "StartUse", rows: [{ row: 0, values: [{ value: formattedStart }] }] },
+            { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
+        ];
     }
 
     // ✅ Refresh Alchemy Token
@@ -91,16 +100,7 @@ app.put("/update-alchemy", async (req, res) => {
         return res.status(500).json({ error: "Failed to refresh Alchemy token" });
     }
 
-    // ✅ Construct Alchemy Payload
-    const alchemyPayload = {
-        recordId: Number(recordId), // Ensure it's a number
-        fields: [
-            { identifier: "StartUse", rows: [{ row: 0, values: [{ value: formattedStart }] }] },
-            { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
-        ]
-    };
-
-    console.log("📤 Sending Alchemy Update Request:", JSON.stringify(alchemyPayload, null, 2));
+    console.log("📤 Sending Alchemy Update Request:", JSON.stringify(req.body, null, 2));
 
     try {
         const response = await fetch(ALCHEMY_UPDATE_URL, {
@@ -109,7 +109,7 @@ app.put("/update-alchemy", async (req, res) => {
                 "Authorization": `Bearer ${alchemyToken}`,
                 "Content-Type": "application/json"
             },
-            body: JSON.stringify(alchemyPayload)
+            body: JSON.stringify(req.body)
         });
 
         const responseText = await response.text();
@@ -127,59 +127,5 @@ app.put("/update-alchemy", async (req, res) => {
     }
 });
 
-// ✅ Route to Handle Calendar Event Deletions
-app.delete("/delete-alchemy", async (req, res) => {
-    console.log("🚨 Received Google Calendar Deletion:", JSON.stringify(req.body, null, 2));
+export default router;
 
-    if (!req.body || !req.body.recordId) {
-        console.error("❌ Invalid delete request data:", JSON.stringify(req.body, null, 2));
-        return res.status(400).json({ error: "Invalid delete request data" });
-    }
-
-    const recordId = req.body.recordId;
-
-    // ✅ Refresh Alchemy Token
-    const alchemyToken = await refreshAlchemyToken();
-    if (!alchemyToken) {
-        return res.status(500).json({ error: "Failed to refresh Alchemy token" });
-    }
-
-    // ✅ Construct Cancellation Payload
-    const cancellationPayload = {
-        recordId: Number(recordId), 
-        fields: [
-            { identifier: "EventStatus", rows: [{ row: 0, values: [{ value: "Removed From Calendar" }] }] }
-        ]
-    };
-
-    console.log("📤 Sending Cancellation Payload:", JSON.stringify(cancellationPayload, null, 2));
-
-    try {
-        const response = await fetch(ALCHEMY_UPDATE_URL, {
-            method: "PUT",
-            headers: {
-                "Authorization": `Bearer ${alchemyToken}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(cancellationPayload)
-        });
-
-        const responseText = await response.text();
-        console.log("✅ Cancellation Response from Alchemy:", responseText);
-
-        if (!response.ok) {
-            throw new Error(`Alchemy API Error: ${responseText}`);
-        }
-
-        res.status(200).json({ success: true, message: "Event deleted in Alchemy", data: responseText });
-    } catch (error) {
-        console.error("🔴 Error updating Alchemy for deletion:", error.message);
-        res.status(500).json({ error: "Failed to update Alchemy for deletion", details: error.message });
-    }
-});
-
-// ✅ Start Middleware Server
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Middleware running on port ${PORT}`);
-});
