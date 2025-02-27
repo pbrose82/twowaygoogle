@@ -8,36 +8,25 @@ dotenv.config();
 
 const router = express.Router();
 
-// Global in-memory tracking (persists during runtime)
+// Global in-memory tracking
 const eventMappings = {};
 
-// Custom file paths for maximum compatibility
+// File path for event tracking
 const TRACKING_FILE = process.env.EVENT_TRACKING_FILE || '/tmp/er_events.json';
-console.log(`Using tracking file at: ${TRACKING_FILE}`);
 
 // Load previously saved mappings
 function loadMappings() {
-    console.log(`Attempting to load tracking data from: ${TRACKING_FILE}`);
     try {
         if (fs.existsSync(TRACKING_FILE)) {
             const data = fs.readFileSync(TRACKING_FILE, 'utf8');
-            console.log(`Read tracking file contents: ${data.substring(0, 100)}${data.length > 100 ? '...' : ''}`);
-            
             const parsed = JSON.parse(data);
-            const count = Object.keys(parsed).length;
-            
-            // Update our in-memory mappings
             Object.assign(eventMappings, parsed);
-            
-            console.log(`✅ Loaded ${count} event mappings`);
-            console.log(`Current mappings: ${JSON.stringify(eventMappings)}`);
+            console.log(`Loaded ${Object.keys(parsed).length} event mappings`);
             return true;
-        } else {
-            console.log(`Tracking file does not exist yet`);
-            return false;
         }
+        return false;
     } catch (error) {
-        console.error(`❌ Error loading mappings: ${error.message}`);
+        console.error(`Error loading mappings: ${error.message}`);
         return false;
     }
 }
@@ -45,30 +34,22 @@ function loadMappings() {
 // Save mappings to disk
 function saveMappings() {
     try {
-        console.log(`Saving mappings: ${JSON.stringify(eventMappings)}`);
         fs.writeFileSync(TRACKING_FILE, JSON.stringify(eventMappings, null, 2), 'utf8');
-        console.log(`✅ Saved ${Object.keys(eventMappings).length} mappings to ${TRACKING_FILE}`);
-        
-        // Verify we can read what we wrote
-        if (fs.existsSync(TRACKING_FILE)) {
-            const content = fs.readFileSync(TRACKING_FILE, 'utf8');
-            console.log(`✅ Verified tracking file content: ${content.substring(0, 100)}${content.length > 100 ? '...' : ''}`);
-        }
         return true;
     } catch (error) {
-        console.error(`❌ Error saving mappings: ${error.message}`);
+        console.error(`Error saving mappings: ${error.message}`);
         return false;
     }
 }
 
-// Extract ER code from summary (for unique tracking)
+// Extract ER code from summary
 function extractERCode(summary) {
     if (!summary) return null;
     
     const match = summary.match(/^(ER\d+)/);
     if (match && match[1]) {
         const erCode = match[1];
-        console.log(`✅ Found ER code: ${erCode}`);
+        console.log(`Found ER code: ${erCode}`);
         return erCode;
     }
     
@@ -103,7 +84,7 @@ function convertAlchemyDate(dateString, timeZone) {
         
         return date.setZone(timeZone).toISO();
     } catch (error) {
-        console.error(`❌ Date conversion error: ${error.message}`);
+        console.error(`Date conversion error: ${error.message}`);
         
         if (dateString.includes('T') && (dateString.includes('Z') || dateString.includes('+'))) {
             return dateString;
@@ -134,7 +115,7 @@ async function getGoogleAccessToken() {
         
         return data.access_token;
     } catch (error) {
-        console.error(`❌ Error getting Google token: ${error.message}`);
+        console.error(`Error getting Google token: ${error.message}`);
         return null;
     }
 }
@@ -159,24 +140,13 @@ async function createEvent(accessToken, calendarId, eventBody, erCode) {
             }
         );
         
-        // Parse response
-        let data;
-        try {
-            const responseText = await response.text();
-            console.log(`Response text: ${responseText}`);
-            data = JSON.parse(responseText);
-        } catch (error) {
-            console.error(`Error parsing response: ${error.message}`);
-            throw new Error("Failed to parse Google API response");
-        }
+        const data = await response.json();
         
         if (!response.ok) {
-            console.error(`Error response: ${JSON.stringify(data)}`);
             throw new Error(`Google Calendar Error: ${data.error?.message || JSON.stringify(data)}`);
         }
         
         // Store the mapping of ER code to event ID
-        console.log(`Recording mapping: ${erCode} -> ${data.id}`);
         eventMappings[erCode] = data.id;
         saveMappings();
         
@@ -190,8 +160,6 @@ async function createEvent(accessToken, calendarId, eventBody, erCode) {
 // Check if an event exists and is not cancelled
 async function checkEventExists(accessToken, calendarId, eventId) {
     try {
-        console.log(`Checking if event ${eventId} exists and is active...`);
-        
         const response = await fetch(
             `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
             {
@@ -204,31 +172,23 @@ async function checkEventExists(accessToken, calendarId, eventId) {
         );
         
         if (response.status === 404) {
-            console.log(`Event ${eventId} not found (deleted)`);
             return { exists: false, reason: "not_found" };
         }
         
         if (!response.ok) {
-            console.error(`Error checking event: ${response.status}`);
             return { exists: false, reason: "api_error" };
         }
         
-        // Parse the response
-        const responseText = await response.text();
-        console.log(`Event check response: ${responseText}`);
-        const data = JSON.parse(responseText);
+        const data = await response.json();
         
         // Check if the event is cancelled
         if (data.status === "cancelled") {
-            console.log(`Event ${eventId} exists but is CANCELLED`);
+            console.log(`Event ${eventId} is cancelled - will create new`);
             return { exists: false, reason: "cancelled", data };
         }
         
-        // Event exists and is active
-        console.log(`Event ${eventId} exists and is active`);
         return { exists: true, data };
     } catch (error) {
-        console.error(`Error checking event: ${error.message}`);
         return { exists: false, reason: "error", message: error.message };
     }
 }
@@ -236,15 +196,14 @@ async function checkEventExists(accessToken, calendarId, eventId) {
 // Update an existing Google Calendar event
 async function updateEvent(accessToken, calendarId, eventId, eventBody) {
     try {
-        console.log(`Updating event: ${eventId}`);
-        
         // First check if the event exists and is active
         const checkResult = await checkEventExists(accessToken, calendarId, eventId);
         
         if (!checkResult.exists) {
-            console.log(`⚠️ Event ${eventId} cannot be updated: ${checkResult.reason}`);
             return { deleted: true, reason: checkResult.reason };
         }
+        
+        console.log(`Updating event: ${eventId}`);
         
         const response = await fetch(
             `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
@@ -260,19 +219,10 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         
         // Handle 404 (event was deleted)
         if (response.status === 404) {
-            console.log(`Event ${eventId} not found during update (likely deleted)`);
             return { deleted: true, reason: "not_found_during_update" };
         }
         
-        let data;
-        try {
-            const responseText = await response.text();
-            console.log(`Update response text: ${responseText}`);
-            data = JSON.parse(responseText);
-        } catch (error) {
-            console.error(`Error parsing response: ${error.message}`);
-            throw new Error("Failed to parse Google API response");
-        }
+        const data = await response.json();
         
         if (!response.ok) {
             throw new Error(`Google Calendar Error: ${data.error?.message || JSON.stringify(data)}`);
@@ -281,7 +231,6 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         return data;
     } catch (error) {
         console.error(`Error updating event: ${error.message}`);
-        // Check if the error is a 404
         if (error.message.includes('404')) {
             return { deleted: true, reason: "error_404" };
         }
@@ -291,10 +240,7 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
 
 // Create or update event route
 router.post("/create-event", async (req, res) => {
-    console.log("📩 Request received:", JSON.stringify(req.body, null, 2));
-    console.log("Current event mappings:", JSON.stringify(eventMappings));
-    
-    // Refresh our event mappings just in case
+    // Refresh our event mappings
     loadMappings();
     
     try {
@@ -327,7 +273,6 @@ router.post("/create-event", async (req, res) => {
         // Extract ER code from summary
         const erCode = extractERCode(summary);
         if (!erCode) {
-            console.log("No ER code found in summary");
             return res.status(400).json({ error: "No ER code found in summary" });
         }
         
@@ -357,7 +302,6 @@ router.post("/create-event", async (req, res) => {
         
         // Check if we have a mapping for this ER code
         const existingEventId = eventMappings[erCode];
-        console.log(`Looking for existing event with ER code ${erCode}: ${existingEventId || 'not found'}`);
         
         let result;
         
@@ -376,7 +320,6 @@ router.post("/create-event", async (req, res) => {
                 return res.status(200).json({
                     success: true,
                     action: "recreated",
-                    reason: result.reason || "deleted",
                     event: result,
                     erCode: erCode
                 });
