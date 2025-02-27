@@ -47,23 +47,33 @@ function saveEventTracking() {
     }
 }
 
-// Function to extract RecordID from description
-function extractRecordIdFromDescription(description) {
-    debug("Attempting to extract RecordID from description:", description);
+// Function to extract event identifier (ER15) from summary or description
+function extractEventIdentifier(summary, description) {
+    debug("Attempting to extract event identifier from summary:", summary);
+    debug("And from description:", description);
     
-    if (!description) {
-        debug("Description is empty or undefined");
-        return null;
+    // Look for patterns like "ER15" at the beginning of summary
+    const summaryMatch = summary ? summary.match(/^([A-Z]+\d+)/) : null;
+    if (summaryMatch && summaryMatch[1]) {
+        debug(`Found event identifier in summary: ${summaryMatch[1]}`);
+        return summaryMatch[1]; // Returns "ER15"
     }
     
-    // Try to extract "RecordID: XXXXX" pattern
-    const recordIdMatch = description.match(/RecordID:\s*(\d+)/i);
+    // Look for the same pattern anywhere in description
+    const descMatch = description ? description.match(/([A-Z]+\d+)/) : null;
+    if (descMatch && descMatch[1]) {
+        debug(`Found event identifier in description: ${descMatch[1]}`);
+        return descMatch[1];
+    }
+    
+    // Look for RecordID as fallback
+    const recordIdMatch = description ? description.match(/RecordID:\s*(\d+)/i) : null;
     if (recordIdMatch && recordIdMatch[1]) {
-        debug(`Successfully extracted RecordID ${recordIdMatch[1]} from description`);
-        return recordIdMatch[1];
+        debug(`Found RecordID in description: ${recordIdMatch[1]}`);
+        return `RID_${recordIdMatch[1]}`; // Return with prefix to distinguish it
     }
     
-    debug("No RecordID pattern found in description");
+    debug("No event identifier found in summary or description");
     return null;
 }
 
@@ -157,9 +167,9 @@ async function getGoogleAccessToken() {
 const recentEvents = new Map();
 const RECENT_EVENT_EXPIRY = 5 * 60 * 1000; // 5 minutes
 
-function addRecentEvent(recordId, eventId) {
-    recentEvents.set(recordId, {
-        eventId,
+function addRecentEvent(eventId, googleEventId) {
+    recentEvents.set(eventId, {
+        googleEventId,
         timestamp: Date.now()
     });
     
@@ -171,18 +181,18 @@ function addRecentEvent(recordId, eventId) {
     }
 }
 
-function getRecentEvent(recordId) {
-    const entry = recentEvents.get(recordId);
+function getRecentEvent(eventId) {
+    const entry = recentEvents.get(eventId);
     if (entry && (Date.now() - entry.timestamp <= RECENT_EVENT_EXPIRY)) {
-        return entry.eventId;
+        return entry.googleEventId;
     }
     return null;
 }
 
 // Direct API functions
-async function createGoogleEvent(accessToken, calendarId, eventData, recordId) {
+async function createGoogleEvent(accessToken, calendarId, eventData, eventId) {
     try {
-        console.log(`➕ Creating new Google Calendar event for record ID: ${recordId}`);
+        console.log(`➕ Creating new Google Calendar event for event ID: ${eventId}`);
         
         const response = await fetch(
             `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
@@ -212,11 +222,11 @@ async function createGoogleEvent(accessToken, calendarId, eventData, recordId) {
             throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
         }
         
-        // Save the mapping of recordId to eventId
-        if (recordId && data.id) {
-            eventTrackingData[recordId] = data.id;
+        // Save the mapping of eventId to googleEventId
+        if (eventId && data.id) {
+            eventTrackingData[eventId] = data.id;
             saveEventTracking();
-            addRecentEvent(recordId, data.id);
+            addRecentEvent(eventId, data.id);
         }
         
         return data;
@@ -226,12 +236,12 @@ async function createGoogleEvent(accessToken, calendarId, eventData, recordId) {
     }
 }
 
-async function updateGoogleEvent(accessToken, calendarId, eventId, eventData) {
+async function updateGoogleEvent(accessToken, calendarId, googleEventId, eventData) {
     try {
-        console.log(`🔄 Updating Google Calendar event: ${eventId}`);
+        console.log(`🔄 Updating Google Calendar event: ${googleEventId}`);
         
         const response = await fetch(
-            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${googleEventId}`,
             {
                 method: "PATCH",
                 headers: {
@@ -248,7 +258,7 @@ async function updateGoogleEvent(accessToken, calendarId, eventId, eventData) {
         
         // If the event was not found (404), it might have been deleted
         if (response.status === 404) {
-            console.log(`⚠️ Event ${eventId} not found, it might have been deleted`);
+            console.log(`⚠️ Event ${googleEventId} not found, it might have been deleted`);
             return null;
         }
         
@@ -276,39 +286,32 @@ router.post("/create-event", async (req, res) => {
     console.log("📩 Alchemy request received for Google Calendar:", JSON.stringify(req.body, null, 2));
     
     // Parse request data, supporting multiple formats
-    let recordId, summary, description, location, startTime, endTime, timeZone, calendarId;
+    let eventId, summary, description, location, startTime, endTime, timeZone, calendarId;
     
     try {
-        // Support various request formats for recordId
-        recordId = req.body.recordId || req.body.id || req.body.record_id;
-        debug("Initial recordId from request properties:", recordId);
-        
         calendarId = req.body.calendarId || req.body.calendar_id || req.body.calendar || 'primary';
         timeZone = req.body.timeZone || req.body.timezone || req.body.time_zone || "America/New_York";
         
         // Handle summary/title
         summary = req.body.summary || req.body.title || req.body.event_name || "Default Event Name";
+        debug("Summary from request:", summary);
         
         // Handle description/notes
         description = req.body.description || req.body.notes || req.body.details || "No Description";
         debug("Description from request:", description);
         
-        // CRITICAL: Try to extract recordId from description if not explicitly provided
-        if (!recordId) {
-            debug("No recordId found in request properties, attempting to extract from description");
-            const extractedId = extractRecordIdFromDescription(description);
-            if (extractedId) {
-                recordId = extractedId;
-                console.log(`✅ FOUND RECORDID IN DESCRIPTION: ${recordId}`);
-            } else {
-                console.log("❌ Failed to extract RecordID from description");
-            }
-        }
+        // CRITICAL: Extract event identifier from summary and description
+        eventId = extractEventIdentifier(summary, description);
         
-        // Ensure the RecordID is in the description for future reference
-        if (recordId && !description.includes(`RecordID: ${recordId}`)) {
-            description = `${description} RecordID: ${recordId}`;
-            debug("Updated description with RecordID:", description);
+        if (eventId) {
+            console.log(`✅ USING EVENT IDENTIFIER: ${eventId}`);
+        } else {
+            // Try the recordId as fallback
+            const recordId = req.body.recordId || req.body.id || req.body.record_id;
+            if (recordId) {
+                eventId = `RID_${recordId}`;
+                console.log(`✅ USING RECORD ID AS FALLBACK: ${eventId}`);
+            }
         }
         
         // Handle location
@@ -350,27 +353,10 @@ router.post("/create-event", async (req, res) => {
             endTime = req.body.end;
         }
         
-        // Last resort - try to find any numeric pattern that could be a RecordID
-        if (!recordId) {
-            debug("Still no recordId found, searching entire request body for potential IDs");
-            const jsonStr = JSON.stringify(req.body);
-            const allNumbers = jsonStr.match(/\d+/g) || [];
-            const potentialIds = allNumbers.filter(num => num.length >= 4 && num.length <= 8);
-            
-            if (potentialIds.length > 0) {
-                console.log(`⚠️ Potential RecordIDs found in request body: ${potentialIds.join(', ')}`);
-                // Use the first one (risky but better than a random ID)
-                recordId = potentialIds[0];
-                console.log(`⚠️ Using potential RecordID: ${recordId}`);
-            } else {
-                console.log("❌ No potential RecordIDs found in request body");
-            }
-        }
-        
-        if (!recordId) {
-            console.warn("⚠️ No recordId found in request, generating a placeholder ID");
+        if (!eventId) {
+            console.warn("⚠️ No event identifier found, generating a placeholder ID");
             // Generate a random ID if none provided
-            recordId = `alchemyEvent_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
+            eventId = `event_${Date.now()}_${Math.floor(Math.random() * 1000)}`;
         }
         
         if (!startTime || !endTime) {
@@ -378,7 +364,7 @@ router.post("/create-event", async (req, res) => {
         }
         
         console.log(`📋 Parsed request data:
-            - Record ID: ${recordId}
+            - Event ID: ${eventId}
             - Calendar ID: ${calendarId}
             - Summary: ${summary}
             - Start: ${startTime}
@@ -389,7 +375,7 @@ router.post("/create-event", async (req, res) => {
         return res.status(400).json({ 
             error: "Invalid request format", 
             message: error.message,
-            required: "Please provide recordId, start and end times"
+            required: "Please provide start and end times"
         });
     }
     
@@ -420,10 +406,10 @@ router.post("/create-event", async (req, res) => {
             start: { dateTime: startISO, timeZone },
             end: { dateTime: endISO, timeZone },
             reminders: req.body.reminders || { useDefault: true },
-            // Add extended properties to store Alchemy record ID
+            // Store the eventId in extended properties
             extendedProperties: {
                 private: {
-                    alchemyRecordId: recordId
+                    eventIdentifier: eventId
                 }
             }
         };
@@ -431,56 +417,56 @@ router.post("/create-event", async (req, res) => {
         // CRITICAL: Check for duplicates using tracking mechanisms
         
         // First check recently created events (in-memory, short term)
-        let recentEventId = getRecentEvent(recordId);
-        if (recentEventId) {
-            console.log(`⚠️ DUPLICATE PREVENTION: Found recently created event for recordId ${recordId}: ${recentEventId}`);
+        let recentGoogleEventId = getRecentEvent(eventId);
+        if (recentGoogleEventId) {
+            console.log(`⚠️ DUPLICATE PREVENTION: Found recently created event for ${eventId}: ${recentGoogleEventId}`);
         }
         
         // Then check persistent tracking (file-based, long term)
-        let trackedEventId = eventTrackingData[recordId];
-        if (trackedEventId) {
-            console.log(`⚠️ DUPLICATE PREVENTION: Found tracked event for recordId ${recordId}: ${trackedEventId}`);
+        let trackedGoogleEventId = eventTrackingData[eventId];
+        if (trackedGoogleEventId) {
+            console.log(`⚠️ DUPLICATE PREVENTION: Found tracked event for ${eventId}: ${trackedGoogleEventId}`);
         }
         
         // Use the most reliable ID available
-        let existingEventId = recentEventId || trackedEventId;
+        let existingGoogleEventId = recentGoogleEventId || trackedGoogleEventId;
         
         let result;
         
-        if (existingEventId) {
+        if (existingGoogleEventId) {
             // Try to update the existing event
             try {
-                result = await updateGoogleEvent(accessToken, calendarId, existingEventId, eventBody);
+                result = await updateGoogleEvent(accessToken, calendarId, existingGoogleEventId, eventBody);
                 
                 // If update succeeded
                 if (result) {
-                    console.log(`✅ Successfully updated event: ${existingEventId}`);
+                    console.log(`✅ Successfully updated event: ${existingGoogleEventId}`);
                     
                     // Make sure the tracking is up to date
-                    eventTrackingData[recordId] = existingEventId;
+                    eventTrackingData[eventId] = existingGoogleEventId;
                     saveEventTracking();
-                    addRecentEvent(recordId, existingEventId);
+                    addRecentEvent(eventId, existingGoogleEventId);
                     
                     return res.status(200).json({
                         success: true,
                         action: "updated",
                         event: result,
-                        recordId: recordId,
-                        eventId: existingEventId
+                        eventId: eventId,
+                        googleEventId: existingGoogleEventId
                     });
                 } else {
                     // Update failed, event might have been deleted
-                    console.log(`⚠️ Failed to update event ${existingEventId}, will create a new one`);
+                    console.log(`⚠️ Failed to update event ${existingGoogleEventId}, will create a new one`);
                     // Continue to create a new event
                 }
             } catch (error) {
-                console.error(`⚠️ Error updating event ${existingEventId}: ${error.message}`);
+                console.error(`⚠️ Error updating event ${existingGoogleEventId}: ${error.message}`);
                 // Continue to create a new event
             }
         }
         
         // Either no existing event was found or update failed - create a new one
-        result = await createGoogleEvent(accessToken, calendarId, eventBody, recordId);
+        result = await createGoogleEvent(accessToken, calendarId, eventBody, eventId);
         
         console.log(`✅ Successfully created new event: ${result.id}`);
         
@@ -488,8 +474,8 @@ router.post("/create-event", async (req, res) => {
             success: true,
             action: "created",
             event: result,
-            recordId: recordId,
-            eventId: result.id
+            eventId: eventId,
+            googleEventId: result.id
         });
     } catch (error) {
         console.error(`❌ Error processing calendar event: ${error.message}`);
@@ -505,8 +491,8 @@ router.get("/tracked-events", (req, res) => {
     return res.status(200).json({
         trackedEvents: eventTrackingData,
         recentEvents: Array.from(recentEvents.entries()).map(([key, value]) => ({
-            recordId: key,
-            eventId: value.eventId,
+            eventId: key,
+            googleEventId: value.googleEventId,
             timestamp: new Date(value.timestamp).toISOString()
         }))
     });
@@ -525,17 +511,30 @@ router.delete("/tracked-events", (req, res) => {
 });
 
 // Route for direct control - create event
-router.post("/force-create/:recordId", async (req, res) => {
-    const recordId = req.params.recordId;
-    console.log(`📋 Direct creation for recordId: ${recordId}`);
+router.post("/force-create/:eventId", async (req, res) => {
+    const forcedEventId = req.params.eventId;
+    console.log(`📋 Direct creation for event ID: ${forcedEventId}`);
     
-    if (!recordId) {
-        return res.status(400).json({ error: "Missing recordId parameter" });
+    if (!forcedEventId) {
+        return res.status(400).json({ error: "Missing eventId parameter" });
     }
     
-    // Forward to normal create with recordId explicitly set
-    req.body.recordId = recordId;
-    return router.handle(req, res, {
+    // Create a deep copy of the request body
+    const modifiedBody = JSON.parse(JSON.stringify(req.body || {}));
+    
+    // Add the event ID to the private extended properties
+    if (!modifiedBody.extendedProperties) {
+        modifiedBody.extendedProperties = { private: {} };
+    } else if (!modifiedBody.extendedProperties.private) {
+        modifiedBody.extendedProperties.private = {};
+    }
+    
+    modifiedBody.extendedProperties.private.eventIdentifier = forcedEventId;
+    
+    // Create a new request with the modified body
+    const newReq = Object.assign({}, req, { body: modifiedBody });
+    
+    return router.handle(newReq, res, {
         method: 'POST',
         url: '/create-event'
     });
