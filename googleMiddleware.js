@@ -159,7 +159,16 @@ async function createEvent(accessToken, calendarId, eventBody, erCode) {
             }
         );
         
-        const data = await response.json();
+        // Parse response
+        let data;
+        try {
+            const responseText = await response.text();
+            console.log(`Response text: ${responseText}`);
+            data = JSON.parse(responseText);
+        } catch (error) {
+            console.error(`Error parsing response: ${error.message}`);
+            throw new Error("Failed to parse Google API response");
+        }
         
         if (!response.ok) {
             console.error(`Error response: ${JSON.stringify(data)}`);
@@ -178,10 +187,52 @@ async function createEvent(accessToken, calendarId, eventBody, erCode) {
     }
 }
 
+// Check if an event exists
+async function checkEventExists(accessToken, calendarId, eventId) {
+    try {
+        console.log(`Checking if event ${eventId} exists...`);
+        
+        const response = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
+            {
+                method: "GET",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                }
+            }
+        );
+        
+        if (response.status === 404) {
+            console.log(`Event ${eventId} not found (deleted)`);
+            return false;
+        }
+        
+        if (!response.ok) {
+            console.error(`Error checking event: ${response.status}`);
+            return false;
+        }
+        
+        // Event exists
+        console.log(`Event ${eventId} exists`);
+        return true;
+    } catch (error) {
+        console.error(`Error checking event: ${error.message}`);
+        return false;
+    }
+}
+
 // Update an existing Google Calendar event
 async function updateEvent(accessToken, calendarId, eventId, eventBody) {
     try {
         console.log(`Updating event: ${eventId}`);
+        
+        // First check if the event exists
+        const exists = await checkEventExists(accessToken, calendarId, eventId);
+        if (!exists) {
+            console.log(`⚠️ Event ${eventId} does not exist (likely deleted)`);
+            return { deleted: true };
+        }
         
         const response = await fetch(
             `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
@@ -198,10 +249,18 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         // Handle 404 (event was deleted)
         if (response.status === 404) {
             console.log(`Event ${eventId} not found (likely deleted)`);
-            return null;
+            return { deleted: true };
         }
         
-        const data = await response.json();
+        let data;
+        try {
+            const responseText = await response.text();
+            console.log(`Response text: ${responseText}`);
+            data = JSON.parse(responseText);
+        } catch (error) {
+            console.error(`Error parsing response: ${error.message}`);
+            throw new Error("Failed to parse Google API response");
+        }
         
         if (!response.ok) {
             throw new Error(`Google Calendar Error: ${data.error?.message || JSON.stringify(data)}`);
@@ -210,6 +269,10 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         return data;
     } catch (error) {
         console.error(`Error updating event: ${error.message}`);
+        // Check if the error is a 404
+        if (error.message.includes('404')) {
+            return { deleted: true };
+        }
         throw error;
     }
 }
@@ -291,7 +354,7 @@ router.post("/create-event", async (req, res) => {
             result = await updateEvent(accessToken, calendarId, existingEventId, eventBody);
             
             // If event was deleted, create a new one
-            if (!result) {
+            if (result && result.deleted) {
                 console.log(`Event ${existingEventId} was deleted, creating new one`);
                 delete eventMappings[erCode];
                 saveMappings();
