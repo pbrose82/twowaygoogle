@@ -56,7 +56,7 @@ async function refreshAlchemyToken() {
 /**
  * ✅ Route to Handle Google Calendar Updates & Push to Alchemy
  */
-router.put("/update-alchemy", async (req, res) => {
+router.post("/update-alchemy", async (req, res) => {
     console.log("📩 Received Google Calendar Update:", JSON.stringify(req.body, null, 2));
 
     if (!req.body || !req.body.description || !req.body.start || !req.body.end) {
@@ -71,7 +71,7 @@ router.put("/update-alchemy", async (req, res) => {
         return res.status(400).json({ error: "Record ID not found in event description" });
     }
 
-    const recordId = Number(recordIdMatch[1]); // Extract numeric ID
+    const recordId = Number(recordIdMatch[1]);
     console.log("🔍 Extracted Record ID:", recordId);
 
     // ✅ Convert Dates to UTC Format
@@ -96,7 +96,7 @@ router.put("/update-alchemy", async (req, res) => {
 
     try {
         const response = await fetch(ALCHEMY_UPDATE_URL, {
-            method: "PUT",
+            method: "POST",  // 🔥 Fix: Using POST instead of PUT
             headers: {
                 "Authorization": `Bearer ${alchemyToken}`,
                 "Content-Type": "application/json"
@@ -118,63 +118,9 @@ router.put("/update-alchemy", async (req, res) => {
 });
 
 /**
- * ✅ Route to Handle Calendar Event Deletion & Push Cancellation to Alchemy
+ * ✅ Route to Handle Event Deletions & Update Alchemy
  */
-router.put("/cancel-alchemy", async (req, res) => {
+router.post("/cancel-alchemy", async (req, res) => {
     console.log("📩 Received Event Deletion Update:", JSON.stringify(req.body, null, 2));
 
-    if (!req.body || !req.body.description) {
-        console.error("❌ Invalid request data:", JSON.stringify(req.body, null, 2));
-        return res.status(400).json({ error: "Invalid request data" });
-    }
-
-    // ✅ Extract Record ID from event description
-    const recordIdMatch = req.body.description.match(/RecordID:\s*(\d+)/);
-    if (!recordIdMatch) {
-        console.error("❌ No valid Record ID found in event description:", req.body.description);
-        return res.status(400).json({ error: "Record ID not found in event description" });
-    }
-
-    const recordId = Number(recordIdMatch[1]);
-    console.log("🚨 Event Deleted! Updating Alchemy: Record ID", recordId);
-
-    // ✅ Refresh Alchemy Token
-    const alchemyToken = await refreshAlchemyToken();
-    if (!alchemyToken) return res.status(500).json({ error: "Failed to refresh Alchemy token" });
-
-    // ✅ Construct Cancellation Payload
-    const cancelPayload = {
-        recordId: recordId,
-        fields: [
-            {
-                identifier: "EventStatus",
-                rows: [{ row: 0, values: [{ value: "Removed From Calendar" }] }]
-            }
-        ]
-    };
-
-    console.log("📤 Sending Cancellation Payload:", JSON.stringify(cancelPayload, null, 2));
-
-    try {
-        const response = await fetch(ALCHEMY_UPDATE_URL, {
-            method: "PUT",
-            headers: {
-                "Authorization": `Bearer ${alchemyToken}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(cancelPayload)
-        });
-
-        const responseText = await response.text();
-        console.log("✅ Cancellation Response from Middleware:", responseText);
-
-        if (!response.ok) throw new Error(`Alchemy API Error: ${responseText}`);
-
-        res.status(200).json({ success: true, message: "Alchemy event marked as removed from calendar" });
-    } catch (error) {
-        console.error("🔴 Error updating Alchemy record:", error.message);
-        res.status(500).json({ error: "Failed to update Alchemy", details: error.message });
-    }
-});
-
-export default router;
+    if (!req.body
