@@ -187,10 +187,10 @@ async function createEvent(accessToken, calendarId, eventBody, erCode) {
     }
 }
 
-// Check if an event exists
+// Check if an event exists and is not cancelled
 async function checkEventExists(accessToken, calendarId, eventId) {
     try {
-        console.log(`Checking if event ${eventId} exists...`);
+        console.log(`Checking if event ${eventId} exists and is active...`);
         
         const response = await fetch(
             `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
@@ -205,20 +205,31 @@ async function checkEventExists(accessToken, calendarId, eventId) {
         
         if (response.status === 404) {
             console.log(`Event ${eventId} not found (deleted)`);
-            return false;
+            return { exists: false, reason: "not_found" };
         }
         
         if (!response.ok) {
             console.error(`Error checking event: ${response.status}`);
-            return false;
+            return { exists: false, reason: "api_error" };
         }
         
-        // Event exists
-        console.log(`Event ${eventId} exists`);
-        return true;
+        // Parse the response
+        const responseText = await response.text();
+        console.log(`Event check response: ${responseText}`);
+        const data = JSON.parse(responseText);
+        
+        // Check if the event is cancelled
+        if (data.status === "cancelled") {
+            console.log(`Event ${eventId} exists but is CANCELLED`);
+            return { exists: false, reason: "cancelled", data };
+        }
+        
+        // Event exists and is active
+        console.log(`Event ${eventId} exists and is active`);
+        return { exists: true, data };
     } catch (error) {
         console.error(`Error checking event: ${error.message}`);
-        return false;
+        return { exists: false, reason: "error", message: error.message };
     }
 }
 
@@ -227,11 +238,12 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
     try {
         console.log(`Updating event: ${eventId}`);
         
-        // First check if the event exists
-        const exists = await checkEventExists(accessToken, calendarId, eventId);
-        if (!exists) {
-            console.log(`⚠️ Event ${eventId} does not exist (likely deleted)`);
-            return { deleted: true };
+        // First check if the event exists and is active
+        const checkResult = await checkEventExists(accessToken, calendarId, eventId);
+        
+        if (!checkResult.exists) {
+            console.log(`⚠️ Event ${eventId} cannot be updated: ${checkResult.reason}`);
+            return { deleted: true, reason: checkResult.reason };
         }
         
         const response = await fetch(
@@ -248,14 +260,14 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         
         // Handle 404 (event was deleted)
         if (response.status === 404) {
-            console.log(`Event ${eventId} not found (likely deleted)`);
-            return { deleted: true };
+            console.log(`Event ${eventId} not found during update (likely deleted)`);
+            return { deleted: true, reason: "not_found_during_update" };
         }
         
         let data;
         try {
             const responseText = await response.text();
-            console.log(`Response text: ${responseText}`);
+            console.log(`Update response text: ${responseText}`);
             data = JSON.parse(responseText);
         } catch (error) {
             console.error(`Error parsing response: ${error.message}`);
@@ -271,7 +283,7 @@ async function updateEvent(accessToken, calendarId, eventId, eventBody) {
         console.error(`Error updating event: ${error.message}`);
         // Check if the error is a 404
         if (error.message.includes('404')) {
-            return { deleted: true };
+            return { deleted: true, reason: "error_404" };
         }
         throw error;
     }
@@ -353,9 +365,9 @@ router.post("/create-event", async (req, res) => {
             // Try to update the existing event
             result = await updateEvent(accessToken, calendarId, existingEventId, eventBody);
             
-            // If event was deleted, create a new one
+            // If event was deleted or cancelled, create a new one
             if (result && result.deleted) {
-                console.log(`Event ${existingEventId} was deleted, creating new one`);
+                console.log(`Event ${existingEventId} cannot be updated (${result.reason}), creating new one`);
                 delete eventMappings[erCode];
                 saveMappings();
                 
@@ -364,6 +376,7 @@ router.post("/create-event", async (req, res) => {
                 return res.status(200).json({
                     success: true,
                     action: "recreated",
+                    reason: result.reason || "deleted",
                     event: result,
                     erCode: erCode
                 });
