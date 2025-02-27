@@ -2,14 +2,43 @@ import express from "express";
 import fetch from "node-fetch";
 import { DateTime } from "luxon";
 import dotenv from "dotenv";
+import fs from "fs";
+import path from "path";
 
 dotenv.config();
 
 const router = express.Router();
 
-// In-memory cache for event mappings (recordId -> eventId)
-// This helps even if extended properties don't work
-const eventCache = new Map();
+// Persistent event tracking using a simple JSON file
+// This ensures we don't create duplicates even after server restart
+const EVENT_TRACKING_FILE = process.env.EVENT_TRACKING_FILE || './event_tracking.json';
+
+// Load existing event tracking data
+let eventTrackingData = {};
+try {
+    if (fs.existsSync(EVENT_TRACKING_FILE)) {
+        const fileContent = fs.readFileSync(EVENT_TRACKING_FILE, 'utf8');
+        eventTrackingData = JSON.parse(fileContent);
+        console.log(`📂 Loaded ${Object.keys(eventTrackingData).length} event mappings from tracking file`);
+    } else {
+        console.log(`📂 No event tracking file found, will create a new one`);
+        fs.writeFileSync(EVENT_TRACKING_FILE, JSON.stringify({}), 'utf8');
+    }
+} catch (error) {
+    console.error(`⚠️ Error with event tracking file: ${error.message}`);
+    // Continue with empty tracking data
+    eventTrackingData = {};
+}
+
+// Function to save event tracking data
+function saveEventTracking() {
+    try {
+        fs.writeFileSync(EVENT_TRACKING_FILE, JSON.stringify(eventTrackingData, null, 2), 'utf8');
+        console.log(`✅ Saved ${Object.keys(eventTrackingData).length} event mappings to tracking file`);
+    } catch (error) {
+        console.error(`⚠️ Error saving event tracking file: ${error.message}`);
+    }
+}
 
 // ✅ Function to Convert Alchemy Date to ISO Format
 function convertAlchemyDate(dateString, timeZone) {
@@ -97,172 +126,125 @@ async function getGoogleAccessToken() {
     }
 }
 
-// 🔄 Enhanced function to Find Existing Google Calendar Event by Alchemy Record ID
-// Now with multiple strategies to find matching events
-async function findExistingEvent(accessToken, calendarId, recordId, summary = null, startTime = null) {
+// Track ALL recently created/updated events (5 minute window)
+// This is a short-term backup to prevent immediate duplicates
+const recentEvents = new Map();
+const RECENT_EVENT_EXPIRY = 5 * 60 * 1000; // 5 minutes
+
+function addRecentEvent(recordId, eventId) {
+    recentEvents.set(recordId, {
+        eventId,
+        timestamp: Date.now()
+    });
+    
+    // Cleanup old entries
+    for (let [key, value] of recentEvents.entries()) {
+        if (Date.now() - value.timestamp > RECENT_EVENT_EXPIRY) {
+            recentEvents.delete(key);
+        }
+    }
+}
+
+function getRecentEvent(recordId) {
+    const entry = recentEvents.get(recordId);
+    if (entry && (Date.now() - entry.timestamp <= RECENT_EVENT_EXPIRY)) {
+        return entry.eventId;
+    }
+    return null;
+}
+
+// 🛑 DIRECT API FUNCTIONS - These bypass the event search and work directly with event IDs
+
+// New function to create a Google Calendar event
+async function createGoogleEvent(accessToken, calendarId, eventData, recordId) {
     try {
-        console.log(`🔍 Looking for existing event with Alchemy record ID: ${recordId}`);
+        console.log(`➕ Creating new Google Calendar event for record ID: ${recordId}`);
         
-        // STRATEGY 1: Check in-memory cache first (fastest)
-        if (eventCache.has(recordId)) {
-            const cachedEventId = eventCache.get(recordId);
-            console.log(`✅ Found event in cache: ${cachedEventId}`);
-            
-            // Verify this event still exists
-            try {
-                const verifyResponse = await fetch(
-                    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${cachedEventId}`,
-                    {
-                        method: "GET",
-                        headers: { "Authorization": `Bearer ${accessToken}` }
-                    }
-                );
-                
-                if (verifyResponse.ok) {
-                    return cachedEventId;
-                } else {
-                    console.log(`⚠️ Cached event ${cachedEventId} no longer exists, removing from cache`);
-                    eventCache.delete(recordId);
-                }
-            } catch (error) {
-                console.error(`⚠️ Error verifying cached event: ${error.message}`);
-                // Continue to other strategies
+        const response = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+            {
+                method: "POST",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(eventData)
             }
-        }
+        );
         
-        // STRATEGY 2: Search by extended properties (most reliable if set correctly)
+        const responseText = await response.text();
+        console.log(`🔍 Google API Response Status: ${response.status}`);
+        console.log(`🔍 Google API Raw Response: ${responseText.substring(0, 500)}`);
+        
+        let data;
         try {
-            const queryParams = new URLSearchParams({
-                privateExtendedProperty: `alchemyRecordId=${recordId}`
-            }).toString();
-            
-            const response = await fetch(
-                `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${queryParams}`, 
-                {
-                    method: "GET",
-                    headers: { "Authorization": `Bearer ${accessToken}` }
-                }
-            );
-            
-            const data = await response.json();
-            
-            if (response.ok && data.items && data.items.length > 0) {
-                const eventId = data.items[0].id;
-                console.log(`✅ Found existing event by extended property: ${eventId}`);
-                eventCache.set(recordId, eventId); // Update cache
-                return eventId;
-            }
-        } catch (error) {
-            console.error(`⚠️ Error searching by extended property: ${error.message}`);
-            // Continue to other strategies
+            data = JSON.parse(responseText);
+        } catch (e) {
+            console.error("❌ Error parsing response JSON:", e);
+            throw new Error(`Invalid response from Google API: ${responseText.substring(0, 100)}`);
         }
         
-        // STRATEGY 3: Search by exact title and description containing recordID (backup method)
-        if (summary) {
-            try {
-                // Search for events with the exact same title
-                const response = await fetch(
-                    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?q=${encodeURIComponent(summary)}`, 
-                    {
-                        method: "GET",
-                        headers: { "Authorization": `Bearer ${accessToken}` }
-                    }
-                );
-                
-                const data = await response.json();
-                
-                if (response.ok && data.items && data.items.length > 0) {
-                    // Look for an event with matching RecordID in description or summary
-                    const recordIdString = `RecordID: ${recordId}`;
-                    const matchingEvent = data.items.find(event => 
-                        (event.description && event.description.includes(recordIdString)) ||
-                        (event.summary && event.summary.includes(recordIdString))
-                    );
-                    
-                    if (matchingEvent) {
-                        console.log(`✅ Found existing event by title/description match: ${matchingEvent.id}`);
-                        eventCache.set(recordId, matchingEvent.id); // Update cache
-                        
-                        // Update the event with extended properties for future lookups
-                        try {
-                            await fetch(
-                                `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${matchingEvent.id}`, 
-                                {
-                                    method: "PATCH",
-                                    headers: { 
-                                        "Authorization": `Bearer ${accessToken}`,
-                                        "Content-Type": "application/json"
-                                    },
-                                    body: JSON.stringify({
-                                        extendedProperties: {
-                                            private: {
-                                                alchemyRecordId: recordId
-                                            }
-                                        }
-                                    })
-                                }
-                            );
-                            console.log(`✅ Updated event ${matchingEvent.id} with extended properties`);
-                        } catch (error) {
-                            console.error(`⚠️ Error updating extended properties: ${error.message}`);
-                        }
-                        
-                        return matchingEvent.id;
-                    }
-                }
-            } catch (error) {
-                console.error(`⚠️ Error searching by title: ${error.message}`);
-                // Continue to last strategy
-            }
+        if (!response.ok) {
+            throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
         }
         
-        // STRATEGY 4: Search by time window (last resort)
-        if (startTime) {
-            try {
-                const startDateTime = new Date(startTime);
-                const timeMin = new Date(startDateTime.getTime() - 5 * 60000).toISOString(); // 5 minutes before
-                const timeMax = new Date(startDateTime.getTime() + 5 * 60000).toISOString(); // 5 minutes after
-                
-                const queryParams = new URLSearchParams({
-                    timeMin,
-                    timeMax,
-                    singleEvents: 'true'
-                }).toString();
-                
-                const response = await fetch(
-                    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events?${queryParams}`, 
-                    {
-                        method: "GET",
-                        headers: { "Authorization": `Bearer ${accessToken}` }
-                    }
-                );
-                
-                const data = await response.json();
-                
-                if (response.ok && data.items && data.items.length > 0) {
-                    // Look for matching summary or description containing recordID
-                    const recordIdString = `RecordID: ${recordId}`;
-                    const matchingEvent = data.items.find(event => 
-                        (event.summary && event.summary === summary) ||
-                        (event.description && event.description.includes(recordIdString))
-                    );
-                    
-                    if (matchingEvent) {
-                        console.log(`✅ Found existing event by time window and content match: ${matchingEvent.id}`);
-                        eventCache.set(recordId, matchingEvent.id); // Update cache
-                        return matchingEvent.id;
-                    }
-                }
-            } catch (error) {
-                console.error(`⚠️ Error searching by time window: ${error.message}`);
-            }
+        // Save the mapping of recordId to eventId
+        if (recordId && data.id) {
+            eventTrackingData[recordId] = data.id;
+            saveEventTracking();
+            addRecentEvent(recordId, data.id);
         }
         
-        console.log(`⚠️ No existing event found for Alchemy record: ${recordId}`);
-        return null;
+        return data;
     } catch (error) {
-        console.error(`❌ Error finding existing event: ${error.message}`);
-        return null;
+        console.error(`❌ Error creating Google event: ${error.message}`);
+        throw error;
+    }
+}
+
+// New function to update a Google Calendar event
+async function updateGoogleEvent(accessToken, calendarId, eventId, eventData) {
+    try {
+        console.log(`🔄 Updating Google Calendar event: ${eventId}`);
+        
+        const response = await fetch(
+            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
+            {
+                method: "PATCH",
+                headers: {
+                    "Authorization": `Bearer ${accessToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(eventData)
+            }
+        );
+        
+        const responseText = await response.text();
+        console.log(`🔍 Google API Response Status: ${response.status}`);
+        console.log(`🔍 Google API Raw Response: ${responseText.substring(0, 500)}`);
+        
+        // If the event was not found (404), it might have been deleted
+        if (response.status === 404) {
+            console.log(`⚠️ Event ${eventId} not found, it might have been deleted`);
+            return null;
+        }
+        
+        let data;
+        try {
+            data = JSON.parse(responseText);
+        } catch (e) {
+            console.error("❌ Error parsing response JSON:", e);
+            throw new Error(`Invalid response from Google API: ${responseText.substring(0, 100)}`);
+        }
+        
+        if (!response.ok) {
+            throw new Error(`Google Calendar Update Error: ${JSON.stringify(data)}`);
+        }
+        
+        return data;
+    } catch (error) {
+        console.error(`❌ Error updating Google event: ${error.message}`);
+        throw error;
     }
 }
 
@@ -390,81 +372,100 @@ router.post("/create-event", async (req, res) => {
             }
         };
         
-        // Check if an event already exists for this Alchemy record
-        const existingEventId = await findExistingEvent(
-            accessToken, 
-            calendarId, 
-            recordId,
-            summary,
-            startISO
-        );
+        // CRITICAL: Check for duplicates using both tracking mechanisms
         
-        let response;
-        let method = "POST";
-        let url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`;
+        // First check recently created events (in-memory, short term)
+        let recentEventId = getRecentEvent(recordId);
+        if (recentEventId) {
+            console.log(`⚠️ DUPLICATE PREVENTION: Found recently created event for recordId ${recordId}: ${recentEventId}`);
+        }
         
-        // If an existing event was found, use PATCH to update it
+        // Then check persistent tracking (file-based, long term)
+        let trackedEventId = eventTrackingData[recordId];
+        if (trackedEventId) {
+            console.log(`⚠️ DUPLICATE PREVENTION: Found tracked event for recordId ${recordId}: ${trackedEventId}`);
+        }
+        
+        // Use the most reliable ID available
+        let existingEventId = recentEventId || trackedEventId;
+        
+        let result;
+        
         if (existingEventId) {
-            method = "PATCH";
-            url = `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${existingEventId}`;
-            console.log(`🔄 Updating existing event: ${existingEventId}`);
-        } else {
-            console.log(`➕ Creating new event for Alchemy record: ${recordId}`);
+            // Try to update the existing event
+            try {
+                result = await updateGoogleEvent(accessToken, calendarId, existingEventId, eventBody);
+                
+                // If update succeeded
+                if (result) {
+                    console.log(`✅ Successfully updated event: ${existingEventId}`);
+                    
+                    // Make sure the tracking is up to date
+                    eventTrackingData[recordId] = existingEventId;
+                    saveEventTracking();
+                    addRecentEvent(recordId, existingEventId);
+                    
+                    return res.status(200).json({
+                        success: true,
+                        action: "updated",
+                        event: result,
+                        recordId: recordId,
+                        eventId: existingEventId
+                    });
+                } else {
+                    // Update failed, event might have been deleted
+                    console.log(`⚠️ Failed to update event ${existingEventId}, will create a new one`);
+                    // Continue to create a new event
+                }
+            } catch (error) {
+                console.error(`⚠️ Error updating event ${existingEventId}: ${error.message}`);
+                // Continue to create a new event
+            }
         }
         
-        // Log the request details
-        console.log(`📤 Sending Updated Payload: ${JSON.stringify(eventBody, null, 2)}`);
+        // Either no existing event was found or update failed - create a new one
+        result = await createGoogleEvent(accessToken, calendarId, eventBody, recordId);
         
-        // Send the request to Google Calendar API
-        response = await fetch(url, {
-            method: method,
-            headers: {
-                "Authorization": `Bearer ${accessToken}`,
-                "Content-Type": "application/json"
-            },
-            body: JSON.stringify(eventBody)
-        });
+        console.log(`✅ Successfully created new event: ${result.id}`);
         
-        const responseText = await response.text();
-        console.log(`🔍 Google API Response Status: ${response.status}`);
-        console.log(`🔍 Google API Raw Response: ${responseText}`);
-        
-        let data;
-        try {
-            data = JSON.parse(responseText);
-        } catch (e) {
-            console.error("❌ Error parsing response JSON:", e);
-            data = { text: responseText };
-        }
-        
-        if (!response.ok) {
-            throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
-        }
-        
-        // Store the successful event mapping in our cache
-        if (data && data.id) {
-            eventCache.set(recordId, data.id);
-            console.log(`✅ Updated event cache: ${recordId} -> ${data.id}`);
-        }
-        
-        const actionType = existingEventId ? "updated" : "created";
-        console.log(`✅ Event successfully ${actionType} in Google Calendar:`, data.id || 'unknown');
-        
-        res.status(200).json({ 
-            success: true, 
-            action: actionType,
-            event: data,
-            recordId: recordId
+        return res.status(200).json({
+            success: true,
+            action: "created",
+            event: result,
+            recordId: recordId,
+            eventId: result.id
         });
     } catch (error) {
-        console.error(`❌ Error ${error.message}`);
-        res.status(500).json({ 
+        console.error(`❌ Error processing calendar event: ${error.message}`);
+        return res.status(500).json({ 
             error: "Failed to process calendar event", 
             details: error.message
         });
     }
 });
 
-// Route handlers for update-event and delete-event remain unchanged
+// Route to get all tracked events (for debugging)
+router.get("/tracked-events", (req, res) => {
+    return res.status(200).json({
+        trackedEvents: eventTrackingData,
+        recentEvents: Array.from(recentEvents.entries()).map(([key, value]) => ({
+            recordId: key,
+            eventId: value.eventId,
+            timestamp: new Date(value.timestamp).toISOString()
+        }))
+    });
+});
+
+// Route to clear tracked events (for debugging/reset)
+router.delete("/tracked-events", (req, res) => {
+    eventTrackingData = {};
+    saveEventTracking();
+    recentEvents.clear();
+    
+    return res.status(200).json({
+        success: true,
+        message: "All event tracking data has been cleared"
+    });
+});
 
 export default router;
