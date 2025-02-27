@@ -1,16 +1,24 @@
-import express from "express";
-import googleRoutes from "./googleMiddleware.js";
-import alchemyRoutes from "./alchemyMiddleware.js";
+// No changes needed to your imports or basic Express setup
 
-const app = express();
-app.use(express.json());
+// Your existing routes
+app.use('/alchemy', alchemyMiddleware);
 
-app.use("/", googleRoutes);
-app.use("/", alchemyRoutes);
+// Update this line to expose both new and old endpoints for Google Calendar
+app.use('/google', googleMiddleware);
 
-const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => {
-    console.log(`🚀 Middleware running on port ${PORT}`);
+// Add a new route for API status
+app.get('/status', (req, res) => {
+  res.json({
+    status: 'ok',
+    alchemy: {
+      configured: !!process.env.ALCHEMY_REFRESH_TOKEN
+    },
+    google: {
+      configured: !!(process.env.GOOGLE_CLIENT_ID && 
+                     process.env.GOOGLE_CLIENT_SECRET && 
+                     process.env.GOOGLE_REFRESH_TOKEN)
+    }
+  });
 });
 
-
+// Your existing server listening code
