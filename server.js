@@ -22,6 +22,13 @@ app.use((req, res, next) => {
 app.use('/alchemy', alchemyMiddleware);
 app.use('/google', googleMiddleware);
 
+// Add a direct route for update-alchemy (in case it's being called directly)
+app.put('/update-alchemy', (req, res) => {
+  console.log("⚠️ Direct call to /update-alchemy detected, forwarding to /alchemy/update-alchemy");
+  req.url = '/update-alchemy';
+  alchemyMiddleware(req, res);
+});
+
 // Add a status endpoint
 app.get('/status', (req, res) => {
   res.json({
