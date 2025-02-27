@@ -114,6 +114,38 @@ async function getGoogleAccessToken() {
     }
 }
 
+// Create a new event in Google Calendar
+async function createNewEvent(accessToken, calendarId, eventBody, erCode) {
+    console.log(`➕ Creating new event ${erCode ? `for ER code ${erCode}` : ''}`);
+    
+    const response = await fetch(
+        `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
+        {
+            method: "POST",
+            headers: {
+                "Authorization": `Bearer ${accessToken}`,
+                "Content-Type": "application/json"
+            },
+            body: JSON.stringify(eventBody)
+        }
+    );
+    
+    const data = await response.json();
+    
+    if (!response.ok) {
+        throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
+    }
+    
+    // If we have an ER code, save the mapping
+    if (erCode) {
+        eventMappings[erCode] = data.id;
+        saveMappings();
+    }
+    
+    console.log(`✅ Successfully created new event: ${data.id}`);
+    return data;
+}
+
 // Route to create or update event
 router.post("/create-event", async (req, res) => {
     console.log("📩 Request received:", JSON.stringify(req.body, null, 2));
@@ -177,38 +209,46 @@ router.post("/create-event", async (req, res) => {
             reminders: req.body.reminders || { useDefault: true }
         };
         
-        let response;
-        
         // Check if we have an existing event with this ER code
         if (erCode && eventMappings[erCode]) {
-            // Update existing event
+            // Try to update existing event
             const eventId = eventMappings[erCode];
-            console.log(`🔄 Updating existing event ${eventId} for ER code ${erCode}`);
+            console.log(`🔄 Attempting to update existing event ${eventId} for ER code ${erCode}`);
             
-            response = await fetch(
-                `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
-                {
-                    method: "PATCH",
-                    headers: {
-                        "Authorization": `Bearer ${accessToken}`,
-                        "Content-Type": "application/json"
-                    },
-                    body: JSON.stringify(eventBody)
+            try {
+                const response = await fetch(
+                    `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events/${eventId}`,
+                    {
+                        method: "PATCH",
+                        headers: {
+                            "Authorization": `Bearer ${accessToken}`,
+                            "Content-Type": "application/json"
+                        },
+                        body: JSON.stringify(eventBody)
+                    }
+                );
+                
+                // If event was deleted (404), create a new one
+                if (response.status === 404) {
+                    console.log(`🔶 Event ${eventId} not found (was deleted). Creating new event...`);
+                    // Remove old mapping
+                    delete eventMappings[erCode];
+                    
+                    // Create new event
+                    const newEventData = await createNewEvent(accessToken, calendarId, eventBody, erCode);
+                    
+                    return res.status(200).json({
+                        success: true,
+                        action: "recreated",
+                        event: newEventData,
+                        erCode: erCode
+                    });
                 }
-            );
-            
-            if (response.status === 404) {
-                // Event was deleted, create a new one
-                console.log(`⚠️ Event ${eventId} not found, creating new one`);
-                delete eventMappings[erCode];
                 
-                // Continue to create new event below
-            } else {
-                const data = await response.json();
-                
+                // If update succeeded
                 if (response.ok) {
+                    const data = await response.json();
                     console.log(`✅ Successfully updated event: ${eventId}`);
-                    saveMappings();
                     
                     return res.status(200).json({
                         success: true,
@@ -217,40 +257,37 @@ router.post("/create-event", async (req, res) => {
                         erCode: erCode
                     });
                 } else {
-                    console.error(`❌ Error updating event: ${JSON.stringify(data)}`);
-                    // Continue to create new event as fallback
+                    // Some other error
+                    const errorData = await response.json();
+                    console.error(`❌ Error updating event: ${JSON.stringify(errorData)}`);
+                    throw new Error(`Google Calendar Update Error: ${JSON.stringify(errorData)}`);
+                }
+            } catch (error) {
+                if (error.message.includes('404')) {
+                    // Handle the case where the event was deleted
+                    console.log(`🔶 Error indicates event ${eventId} was deleted. Creating new event...`);
+                    delete eventMappings[erCode];
+                    
+                    // Create new event
+                    const newEventData = await createNewEvent(accessToken, calendarId, eventBody, erCode);
+                    
+                    return res.status(200).json({
+                        success: true,
+                        action: "recreated",
+                        event: newEventData,
+                        erCode: erCode
+                    });
+                } else {
+                    // Re-throw other errors
+                    throw error;
                 }
             }
         }
         
-        // Create new event if needed
-        console.log(`➕ Creating new event ${erCode ? `for ER code ${erCode}` : ''}`);
-        
-        response = await fetch(
-            `https://www.googleapis.com/calendar/v3/calendars/${calendarId}/events`,
-            {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${accessToken}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify(eventBody)
-            }
-        );
-        
-        const data = await response.json();
-        
-        if (!response.ok) {
-            throw new Error(`Google Calendar Error: ${JSON.stringify(data)}`);
-        }
-        
-        // If we have an ER code, save the mapping
-        if (erCode) {
-            eventMappings[erCode] = data.id;
-            saveMappings();
-        }
-        
-        console.log(`✅ Successfully created new event: ${data.id}`);
+        // Create new event for cases where:
+        // 1. No ER code was found
+        // 2. No existing mapping for this ER code
+        const data = await createNewEvent(accessToken, calendarId, eventBody, erCode);
         
         return res.status(200).json({
             success: true,
@@ -278,6 +315,27 @@ router.delete("/tracked-events", (req, res) => {
         success: true,
         message: "Cleared all event mappings"
     });
+});
+
+// Manually remove a specific ER code mapping
+router.delete("/tracked-events/:erCode", (req, res) => {
+    const erCode = req.params.erCode;
+    
+    if (eventMappings[erCode]) {
+        const eventId = eventMappings[erCode];
+        delete eventMappings[erCode];
+        saveMappings();
+        
+        return res.status(200).json({
+            success: true,
+            message: `Removed mapping for ER code ${erCode} (event ID: ${eventId})`
+        });
+    } else {
+        return res.status(404).json({
+            success: false,
+            message: `No mapping found for ER code ${erCode}`
+        });
+    }
 });
 
 export default router;
