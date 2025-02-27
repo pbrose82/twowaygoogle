@@ -68,7 +68,7 @@ async function refreshAlchemyToken() {
 /**
  * ✅ Route: Update Alchemy Record from Google Calendar
  */
-router.post("/update-alchemy", async (req, res) => {
+router.put("/update-alchemy", async (req, res) => {
     console.log("📩 Received Google Calendar Update:", JSON.stringify(req.body, null, 2));
 
     if (!req.body || !req.body.description || !req.body.start || !req.body.end) {
