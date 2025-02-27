@@ -112,7 +112,35 @@ router.put("/update-alchemy", async (req, res) => {
 
     // ✅ Check if the event exists in Alchemy
     const existingEvent = await getAlchemyEvent(recordId, alchemyToken);
-    const isUpdate = !!existingEvent;
+
+    if (req.body.deleted) {
+        // ✅ Handle Event Deletion
+        console.log("🚨 Event Deleted, Updating Alchemy Record");
+        const deletePayload = {
+            recordId,
+            fields: [
+                { identifier: "EventStatus", rows: [{ row: 0, values: [{ value: "Removed From Calendar" }] }] }
+            ]
+        };
+
+        try {
+            const response = await fetch(ALCHEMY_UPDATE_URL, {
+                method: "PUT",
+                headers: {
+                    "Authorization": `Bearer ${alchemyToken}`,
+                    "Content-Type": "application/json"
+                },
+                body: JSON.stringify(deletePayload)
+            });
+
+            const responseText = await response.text();
+            console.log("✅ Cancellation Response from Alchemy:", responseText);
+            return res.status(200).json({ success: true, message: "Event marked as removed from calendar." });
+        } catch (error) {
+            console.error("🔴 Error updating Alchemy record for deletion:", error.message);
+            return res.status(500).json({ error: "Failed to update Alchemy", details: error.message });
+        }
+    }
 
     // ✅ Convert Dates to UTC Format
     const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
@@ -127,7 +155,7 @@ router.put("/update-alchemy", async (req, res) => {
         { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
     ];
 
-    console.log(`${isUpdate ? "🔄 Updating" : "🆕 Creating"} event in Alchemy for Record ID: ${recordId}`);
+    console.log("📤 Sending Alchemy Update Request:", JSON.stringify(req.body, null, 2));
 
     try {
         const response = await fetch(ALCHEMY_UPDATE_URL, {
@@ -140,14 +168,8 @@ router.put("/update-alchemy", async (req, res) => {
         });
 
         const responseText = await response.text();
-        console.log("🔍 Alchemy API Response Status:", response.status);
-        console.log("🔍 Alchemy API Raw Response:", responseText);
-
-        if (!response.ok) {
-            throw new Error(`Alchemy API Error: ${responseText}`);
-        }
-
-        res.status(200).json({ success: true, message: `Alchemy record ${isUpdate ? "updated" : "created"}`, data: responseText });
+        console.log("✅ Alchemy API Response:", responseText);
+        res.status(200).json({ success: true, message: "Alchemy record updated", data: responseText });
     } catch (error) {
         console.error("🔴 Error updating Alchemy record:", error.message);
         res.status(500).json({ error: "Failed to update Alchemy", details: error.message });
