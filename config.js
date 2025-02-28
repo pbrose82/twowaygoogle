@@ -24,7 +24,7 @@ const config = {
     // Event status values
     eventStatuses: {
       pushed: process.env.ALCHEMY_STATUS_PUSHED || "Pushed to Calendar",
-      cancelled: process.env.ALCHEMY_STATUS_CANCELLED || "Removed from Calendar"
+      cancelled: process.env.ALCHEMY_STATUS_CANCELLED || "Removed From Calendar"
     }
   },
   
