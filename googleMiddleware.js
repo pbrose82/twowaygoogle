@@ -1,18 +1,27 @@
 import express from "express";
 import fetch from "node-fetch";
 import { DateTime } from "luxon";
-import dotenv from "dotenv";
 import fs from "fs";
-
-dotenv.config();
+import config from "./config.js";
 
 const router = express.Router();
+
+// Get Google configuration from config.js
+const {
+  clientId: GOOGLE_CLIENT_ID,
+  clientSecret: GOOGLE_CLIENT_SECRET,
+  refreshToken: GOOGLE_REFRESH_TOKEN,
+  defaultTimeZone,
+  trackingFile: TRACKING_FILE
+} = config.google;
+
+// Get Alchemy field mappings
+const { startField, endField } = config.alchemy.fields;
 
 // Global in-memory tracking
 const eventMappings = {};
 
-// File path for event tracking
-const TRACKING_FILE = process.env.EVENT_TRACKING_FILE || '/tmp/er_events.json';
+console.log(`Using tracking file at: ${TRACKING_FILE}`);
 
 // Load previously saved mappings
 function loadMappings() {
@@ -100,9 +109,9 @@ async function getGoogleAccessToken() {
             method: "POST",
             headers: { "Content-Type": "application/x-www-form-urlencoded" },
             body: new URLSearchParams({
-                client_id: process.env.GOOGLE_CLIENT_ID,
-                client_secret: process.env.GOOGLE_CLIENT_SECRET,
-                refresh_token: process.env.GOOGLE_REFRESH_TOKEN,
+                client_id: GOOGLE_CLIENT_ID,
+                client_secret: GOOGLE_CLIENT_SECRET,
+                refresh_token: GOOGLE_REFRESH_TOKEN,
                 grant_type: "refresh_token"
             })
         });
@@ -248,26 +257,41 @@ router.post("/create-event", async (req, res) => {
         const summary = req.body.summary || "";
         const description = req.body.description || "";
         const location = req.body.location || "";
-        const calendarId = req.body.calendarId || "primary";
-        const timeZone = req.body.timeZone || "America/New_York";
+        const calendarId = req.body.calendarId || config.google.defaultCalendarId || "primary";
+        const timeZone = req.body.timeZone || defaultTimeZone;
         
-        // Get start and end times
+        // Get start and end times - support configured field names
         let startTime, endTime;
         
         if (req.body.start && req.body.start.dateTime) {
             startTime = req.body.start.dateTime;
-        } else if (req.body.StartUse) {
-            startTime = req.body.StartUse;
+        } else if (req.body[startField]) {
+            startTime = req.body[startField];
+        } else if (req.body.start_time) {
+            startTime = req.body.start_time;
+        } else if (req.body.startTime) {
+            startTime = req.body.startTime;
+        } else if (req.body.start) {
+            startTime = req.body.start;
         }
         
         if (req.body.end && req.body.end.dateTime) {
             endTime = req.body.end.dateTime;
-        } else if (req.body.EndUse) {
-            endTime = req.body.EndUse;
+        } else if (req.body[endField]) {
+            endTime = req.body[endField];
+        } else if (req.body.end_time) {
+            endTime = req.body.end_time;
+        } else if (req.body.endTime) {
+            endTime = req.body.endTime;
+        } else if (req.body.end) {
+            endTime = req.body.end;
         }
         
         if (!startTime || !endTime) {
-            return res.status(400).json({ error: "Missing start or end time" });
+            return res.status(400).json({ 
+                error: "Missing start or end time",
+                message: `Expected fields: ${startField}, ${endField} or other time formats`
+            });
         }
         
         // Extract ER code from summary
