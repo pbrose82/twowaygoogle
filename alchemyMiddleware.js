@@ -1,17 +1,19 @@
 import express from "express";
 import fetch from "node-fetch";
 import { DateTime } from "luxon";
-import dotenv from "dotenv";
-
-dotenv.config();
+import config from "./config.js";
 
 const router = express.Router();
 
-// Alchemy API configuration
-const ALCHEMY_REFRESH_URL = "https://core-production.alchemy.cloud/core/api/v2/refresh-token";
-const ALCHEMY_UPDATE_URL = "https://core-production.alchemy.cloud/core/api/v2/update-record";
-const TENANT_NAME = "productcaseelnlims4uat";
-const ALCHEMY_REFRESH_TOKEN = process.env.ALCHEMY_REFRESH_TOKEN;
+// Get Alchemy configuration from config.js
+const {
+  refreshUrl: ALCHEMY_REFRESH_URL,
+  updateUrl: ALCHEMY_UPDATE_URL,
+  tenantName: TENANT_NAME,
+  refreshToken: ALCHEMY_REFRESH_TOKEN,
+  fields: { startField, endField, statusField },
+  eventStatuses: { pushed, cancelled }
+} = config.alchemy;
 
 /**
  * Convert Date to Alchemy Format (UTC)
@@ -72,7 +74,7 @@ router.put("/update-alchemy", async (req, res) => {
     const recordId = req.body.recordId;
 
     // Check if event is being cancelled
-    if (req.body.fields && req.body.fields[0].identifier === "EventStatus") {
+    if (req.body.fields && req.body.fields[0].identifier === statusField) {
         console.log(`Processing event cancellation for record ID: ${recordId}`);
     } else {
         // Convert Dates to UTC Format
@@ -84,8 +86,8 @@ router.put("/update-alchemy", async (req, res) => {
         }
 
         req.body.fields = [
-            { identifier: "StartUse", rows: [{ row: 0, values: [{ value: formattedStart }] }] },
-            { identifier: "EndUse", rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
+            { identifier: startField, rows: [{ row: 0, values: [{ value: formattedStart }] }] },
+            { identifier: endField, rows: [{ row: 0, values: [{ value: formattedEnd }] }] }
         ];
     }
 
