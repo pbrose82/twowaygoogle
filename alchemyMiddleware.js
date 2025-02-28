@@ -76,6 +76,10 @@ router.put("/update-alchemy", async (req, res) => {
     // Check if event is being cancelled
     if (req.body.fields && req.body.fields[0].identifier === statusField) {
         console.log(`Processing event cancellation for record ID: ${recordId}`);
+        // Set the status to the configured cancellation status
+        req.body.fields = [
+            { identifier: statusField, rows: [{ row: 0, values: [{ value: cancelled }] }] }
+        ];
     } else {
         // Convert Dates to UTC Format
         const formattedStart = convertToAlchemyFormat(req.body.start.dateTime);
