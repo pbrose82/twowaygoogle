@@ -1,13 +1,11 @@
 import express from "express";
 import alchemyMiddleware from "./alchemyMiddleware.js";
 import googleMiddleware from "./googleMiddleware.js";
-import dotenv from "dotenv";
-
-dotenv.config();
+import config from "./config.js";
 
 // Create Express app
 const app = express();
-const PORT = process.env.PORT || 3000;
+const { port } = config.server;
 
 // Middleware
 app.use(express.json());
@@ -38,13 +36,20 @@ app.get('/status', (req, res) => {
   res.json({
     status: 'ok',
     version: '1.1.0',
-    alchemy: {
-      configured: !!process.env.ALCHEMY_REFRESH_TOKEN
-    },
-    google: {
-      configured: !!(process.env.GOOGLE_CLIENT_ID && 
-                    process.env.GOOGLE_CLIENT_SECRET && 
-                    process.env.GOOGLE_REFRESH_TOKEN)
+    config: {
+      alchemy: {
+        tenant: config.alchemy.tenantName,
+        configured: !!config.alchemy.refreshToken,
+        fields: config.alchemy.fields
+      },
+      google: {
+        configured: !!(config.google.clientId && 
+                       config.google.clientSecret && 
+                       config.google.refreshToken),
+        defaultTimeZone: config.google.defaultTimeZone,
+        trackingFile: config.google.trackingFile,
+        defaultCalendarId: config.google.defaultCalendarId || 'not set'
+      }
     }
   });
 });
@@ -68,15 +73,20 @@ app.use((err, req, res, next) => {
 });
 
 // Start server
-app.listen(PORT, '0.0.0.0', () => {
-  console.log(`Server running on port ${PORT}`);
+app.listen(port, '0.0.0.0', () => {
+  console.log(`Server running on port ${port}`);
   
-  // Log environment configuration
-  console.log(`Environment: ${process.env.NODE_ENV || 'development'}`);
-  ['ALCHEMY_REFRESH_TOKEN', 'GOOGLE_CLIENT_ID', 'GOOGLE_CLIENT_SECRET', 'GOOGLE_REFRESH_TOKEN']
-    .forEach(envVar => {
-      console.log(`${envVar}: ${process.env[envVar] ? 'configured ✓' : 'missing ✗'}`);
-    });
+  // Log configuration
+  console.log(`Environment: ${config.server.environment}`);
+  console.log(`Alchemy Tenant: ${config.alchemy.tenantName}`);
+  console.log(`Google Default Timezone: ${config.google.defaultTimeZone}`);
+  
+  // Validate configuration
+  if (!config.isValid) {
+    console.warn("⚠️ Server is running with incomplete configuration!");
+  } else {
+    console.log("✓ Configuration validated successfully");
+  }
 });
 
 export default app;
