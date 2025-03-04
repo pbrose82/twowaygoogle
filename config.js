@@ -49,10 +49,10 @@ const config = {
     // Event status values - these must match the values expected in Alchemy
     // ----------------------------------
     // pushed: Status when event is created (default: "Pushed to Calendar")
-    // cancelled: Status when event is deleted (default: "Removed from Calendar")
+    // cancelled: Status when event is deleted (default: "Removed From Calendar")
     eventStatuses: {
       pushed: process.env.ALCHEMY_STATUS_PUSHED || "Pushed to Calendar",
-      cancelled: process.env.ALCHEMY_STATUS_CANCELLED || "Removed from Calendar"
+      cancelled: process.env.ALCHEMY_STATUS_CANCELLED || "Removed From Calendar"
     }
   },
   
